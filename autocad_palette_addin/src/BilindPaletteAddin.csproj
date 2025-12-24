@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Library</OutputType>
+    <RootNamespace>Bilind.AutoCAD.Addin</RootNamespace>
+    <AssemblyName>BilindPaletteAddin</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Update the HintPath values to match the AutoCAD version installed on the target machine. -->
+    <Reference Include="acdbmgd">
+      <HintPath>$(ACAD_INSTALL)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acmgd">
+      <HintPath>$(ACAD_INSTALL)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AdWindows">
+      <HintPath>$(ACAD_INSTALL)\AdWindows.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Runtime\PaletteCommands.cs" />
+    <Compile Include="Runtime\MeasurementPaletteControl.cs" />
+    <Compile Include="Runtime\MeasurementResult.cs" />
+    <Compile Include="Runtime\SelectionMeasurementService.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "O36BBalSMVk=",
+  "success": true,
+  "projectFilePath": "D:\\vscode\\autocad_palette_addin\\src\\BilindPaletteAddin.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\BG\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.3\\microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
+    "C:\\Users\\BG\\.nuget\\packages\\microsoft.netframework.referenceassemblies.net48\\1.0.3\\microsoft.netframework.referenceassemblies.net48.1.0.3.nupkg.sha512"
+  ],
+  "logs": []
+}
