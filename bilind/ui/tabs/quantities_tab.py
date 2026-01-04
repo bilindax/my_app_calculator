@@ -82,7 +82,8 @@ class QuantitiesTab(BaseTab):
         self.create_button(bar, "🗑️ Delete", self._delete_selected, 'Danger.TButton').pack(side=tk.RIGHT, padx=4)
 
         self.create_button(bar, "📘 دفتر الكميات الشامل", self._export_comprehensive_book, 'Accent.TButton').pack(side=tk.RIGHT, padx=6)
-        self.create_button(bar, "�📊 Insert Table to AutoCAD", self._insert_table_to_autocad, 'Accent.TButton').pack(side=tk.RIGHT, padx=6)
+        self.create_button(bar, "📑 دفتر المساحة الموحد", self._export_master_sheet, 'Accent.TButton').pack(side=tk.RIGHT, padx=6)
+        self.create_button(bar, "📊 Insert Table to AutoCAD", self._insert_table_to_autocad, 'Accent.TButton').pack(side=tk.RIGHT, padx=6)
 
     def _create_table(self, parent):
         table_frame = ttk.Frame(parent, style='Main.TFrame', padding=(12, 10))
@@ -456,6 +457,7 @@ class QuantitiesTab(BaseTab):
             ('plaster', 'Plaster Works (اللياسة)'),
             ('ceramic', 'Ceramic Works (السيراميك)'),
             ('paint', 'Paint Works (الدهانات)'),
+            ('openings', 'Openings (الأبواب والشبابيك)'),
             ('baseboards', 'Baseboards (النعلات)'),
             ('stone', 'Stone Works (الحجر)'),
             ('walls', 'Masonry/Walls (المباني)'),
@@ -524,6 +526,28 @@ class QuantitiesTab(BaseTab):
                 selected_sheets=selected_sheets
             )
             messagebox.showinfo("تم التصدير", f"تم حفظ دفتر الكميات الشامل في:\n{filepath}")
+        except Exception as exc:
+            messagebox.showerror("فشل التصدير", f"حدث خطأ أثناء التصدير:\n{exc}")
+
+    def _export_master_sheet(self):
+        """Export the Master Sheet (Unified View)."""
+        if not self.app.project.rooms:
+            messagebox.showinfo("لا توجد غرف", "أضف الغرف أولاً قبل التصدير.")
+            return
+
+        filepath = self.app._ask_save_path('دفتر_المساحة_الموحد.xlsx', 'excel')
+        if not filepath:
+            return
+
+        try:
+            from bilind.export.master_sheet_export import export_master_sheet
+            export_master_sheet(
+                self.app.project, 
+                filepath, 
+                app=self.app, 
+                status_cb=self.app.update_status
+            )
+            messagebox.showinfo("تم التصدير", f"تم حفظ دفتر المساحة الموحد في:\n{filepath}")
         except Exception as exc:
             messagebox.showerror("فشل التصدير", f"حدث خطأ أثناء التصدير:\n{exc}")
 

@@ -9,6 +9,7 @@ from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING, Optional, List, Dict
 from bilind.models.wall import Wall
 from bilind.ui.tabs.helpers import RoomAdapter, OpeningAdapter, show_ceramic_calculator
+from bilind.calculations.unified_calculator import UnifiedCalculator
 # Legacy room_metrics removed - uses UnifiedCalculator instead
 from bilind.ui.visuals.room_canvas import RoomCanvas
 
@@ -454,8 +455,191 @@ class RoomManagerTab:
             command=self._recalculate_wall_deductions,
             style='Secondary.TButton'
         ).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(
+            btn_frame2,
+            text="📏 تحويل وحدات الغرفة",
+            command=self._convert_room_units,
+            style='Secondary.TButton'
+        ).pack(side=tk.RIGHT)
         
         return walls_frame
+
+    def _convert_room_units(self):
+        """Apply a unit conversion factor to ONLY the selected room."""
+        if not self.selected_room:
+            messagebox.showinfo("لا توجد غرفة", "اختر غرفة أولاً")
+            return
+
+        from tkinter import simpledialog
+        from bilind.ui.tabs.helpers.room_adapter import RoomAdapter
+        from bilind.ui.tabs.helpers.opening_adapter import OpeningAdapter
+
+        adapter = RoomAdapter(self.selected_room)
+        room_name = adapter.name
+        if not room_name:
+            messagebox.showwarning("خطأ", "اسم الغرفة غير معروف")
+            return
+
+        factor = simpledialog.askfloat(
+            "تحويل وحدات الغرفة",
+            "أدخل معامل التحويل للأطوال (مثال: سم ➜ متر = 0.01 ، مم ➜ متر = 0.001):",
+            initialvalue=0.01,
+            minvalue=0.000001,
+        )
+        if factor is None:
+            return
+        factor = float(factor)
+        factor_area = factor * factor
+
+        include_openings = messagebox.askyesno(
+            "تحويل وحدات الغرفة",
+            "هل تريد أيضاً تحويل أبعاد الفتحات (الأبواب/النوافذ) الخاصة بهذه الغرفة فقط؟\n\n"
+            "(سيتم تحويل الفتحة فقط إذا كانت مرتبطة بهذه الغرفة وحدها.)"
+        )
+
+        if not messagebox.askyesno(
+            "تأكيد",
+            f"سيتم تحويل أبعاد الغرفة '{room_name}' بمعامل {factor}.\n\nهل تريد المتابعة؟"
+        ):
+            return
+
+        def _scale_len(value):
+            try:
+                return float(value or 0.0) * factor
+            except Exception:
+                return value
+
+        def _scale_area_value(value):
+            try:
+                return float(value or 0.0) * factor_area
+            except Exception:
+                return value
+
+        # --- Scale room core fields ---
+        if isinstance(self.selected_room, dict):
+            for k in ('w', 'l', 'width', 'length', 'perim', 'perimeter', 'wall_height'):
+                if k in self.selected_room and self.selected_room[k] is not None:
+                    self.selected_room[k] = _scale_len(self.selected_room[k])
+            for k in ('area',):
+                if k in self.selected_room and self.selected_room[k] is not None:
+                    self.selected_room[k] = _scale_area_value(self.selected_room[k])
+
+            # Clear cached finish areas (they will be recomputed)
+            for k in ('ceiling_finish_area', 'wall_finish_area', 'ceramic_area'):
+                if k in self.selected_room:
+                    self.selected_room[k] = None
+        else:
+            # dataclass Room
+            if getattr(self.selected_room, 'width', None) is not None:
+                self.selected_room.width = _scale_len(self.selected_room.width)
+            if getattr(self.selected_room, 'length', None) is not None:
+                self.selected_room.length = _scale_len(self.selected_room.length)
+            if getattr(self.selected_room, 'perimeter', None) is not None:
+                self.selected_room.perimeter = _scale_len(self.selected_room.perimeter)
+            if getattr(self.selected_room, 'area', None) is not None:
+                self.selected_room.area = _scale_area_value(self.selected_room.area)
+            if getattr(self.selected_room, 'wall_height', None) is not None:
+                self.selected_room.wall_height = _scale_len(self.selected_room.wall_height)
+
+            self.selected_room.ceiling_finish_area = None
+            self.selected_room.wall_finish_area = None
+            self.selected_room.ceramic_area = None
+
+        # --- Scale walls ---
+        walls = adapter.walls
+        for w in (walls or []):
+            if isinstance(w, dict):
+                if 'length' in w and w['length'] is not None:
+                    w['length'] = _scale_len(w['length'])
+                if 'height' in w and w['height'] is not None:
+                    w['height'] = _scale_len(w['height'])
+                if 'ceramic_height' in w and w['ceramic_height'] is not None:
+                    w['ceramic_height'] = _scale_len(w['ceramic_height'])
+                try:
+                    ln = float(w.get('length') or 0.0)
+                    ht = float(w.get('height') or 0.0)
+                    w['gross_area'] = ln * ht
+                    ch = float(w.get('ceramic_height') or 0.0)
+                    if ch > 0:
+                        w['ceramic_area'] = ln * ch
+                except Exception:
+                    pass
+            else:
+                if getattr(w, 'length', None) is not None:
+                    w.length = _scale_len(w.length)
+                if getattr(w, 'height', None) is not None:
+                    w.height = _scale_len(w.height)
+                if getattr(w, 'ceramic_height', None) is not None:
+                    w.ceramic_height = _scale_len(w.ceramic_height)
+                try:
+                    w.gross_area = float(getattr(w, 'length', 0.0) or 0.0) * float(getattr(w, 'height', 0.0) or 0.0)
+                    if float(getattr(w, 'ceramic_height', 0.0) or 0.0) > 0:
+                        w.ceramic_area = float(getattr(w, 'length', 0.0) or 0.0) * float(getattr(w, 'ceramic_height', 0.0) or 0.0)
+                except Exception:
+                    pass
+
+        # --- Optionally scale openings that are exclusive to this room ---
+        if include_openings:
+            for opening in list(self.app.project.doors or []) + list(self.app.project.windows or []):
+                oad = OpeningAdapter(opening)
+                assigned = list(oad.assigned_rooms or [])
+                is_exclusive = (len(assigned) == 1 and assigned[0] == room_name)
+                if not is_exclusive:
+                    # If per-room quantities exist and only this room is present
+                    rq = oad.room_quantities or {}
+                    if isinstance(rq, dict) and rq and set(rq.keys()) == {room_name}:
+                        is_exclusive = True
+                if not is_exclusive:
+                    continue
+
+                if oad.is_dict:
+                    if 'w' in opening and opening['w'] is not None:
+                        opening['w'] = _scale_len(opening['w'])
+                    if 'h' in opening and opening['h'] is not None:
+                        opening['h'] = _scale_len(opening['h'])
+                    if 'width' in opening and opening['width'] is not None:
+                        opening['width'] = _scale_len(opening['width'])
+                    if 'height' in opening and opening['height'] is not None:
+                        opening['height'] = _scale_len(opening['height'])
+                    if 'placement_height' in opening and opening['placement_height'] is not None:
+                        opening['placement_height'] = _scale_len(opening['placement_height'])
+                else:
+                    try:
+                        if getattr(opening, 'width', None) is not None:
+                            opening.width = _scale_len(opening.width)
+                        if getattr(opening, 'height', None) is not None:
+                            opening.height = _scale_len(opening.height)
+                        if getattr(opening, 'placement_height', None) is not None:
+                            opening.placement_height = _scale_len(opening.placement_height)
+                    except Exception:
+                        pass
+
+        # Recompute deductions and finishes for this room
+        all_openings = list(self.app.project.doors) + list(self.app.project.windows)
+        for w in (adapter.walls or []):
+            if not isinstance(w, dict) and hasattr(w, 'recalculate_deductions'):
+                try:
+                    w.recalculate_deductions(all_openings)
+                except Exception:
+                    pass
+
+        # Sync project references for exporters and refresh UI
+        self.app._sync_project_references()
+        self._load_room_details(self.selected_room)
+        if hasattr(self.selected_room, 'update_finish_areas'):
+            try:
+                self.selected_room.update_finish_areas(all_openings)
+            except Exception:
+                pass
+        self._recalculate_room_ceramic_with_openings(self.selected_room)
+        metrics = self._compute_room_finish_metrics(self.selected_room)
+        self._update_room_metrics_ui(metrics)
+
+        if hasattr(self.app, 'refresh_after_wall_change'):
+            self.app.refresh_after_wall_change()
+
+        self.app.update_status(f"📏 تم تحويل وحدات الغرفة '{room_name}' بمعامل {factor}", icon="✅")
 
     def _create_room_visuals_section(self):
         """Create mini-visual section that sketches wall finishes."""
@@ -2461,6 +2645,46 @@ class RoomManagerTab:
         calc = UnifiedCalculator(project)
         room_calc = calc.calculate_room(room)
 
+        # Compute perimeter and wall height for UI display
+        try:
+            perimeter = float(getattr(room, 'perimeter', 0.0) or 0.0) if not isinstance(room, dict) else float(room.get('perimeter', room.get('perim', 0.0)) or 0.0)
+        except Exception:
+            perimeter = 0.0
+        if perimeter <= 0:
+            try:
+                walls = room.get('walls', []) if isinstance(room, dict) else (getattr(room, 'walls', []) or [])
+                perimeter = sum(float((w.get('length', 0.0) if isinstance(w, dict) else getattr(w, 'length', 0.0)) or 0.0) for w in (walls or []))
+            except Exception:
+                perimeter = 0.0
+
+        try:
+            wall_height = float(room.get('wall_height', 3.0) or 3.0) if isinstance(room, dict) else float(getattr(room, 'wall_height', 3.0) or 3.0)
+        except Exception:
+            wall_height = 3.0
+
+        # Breakdown openings into doors/windows areas (for legacy UI fields)
+        doors_area = 0.0
+        windows_area = 0.0
+        try:
+            room_name = (room.get('name', '') if isinstance(room, dict) else getattr(room, 'name', ''))
+            opening_ids = room.get('opening_ids', []) if isinstance(room, dict) else (getattr(room, 'opening_ids', []) or [])
+            for oid in (opening_ids or []):
+                opening = calc.openings_map.get(oid)
+                if not opening:
+                    continue
+                otype = str(calc._get_attr(opening, 'opening_type', '') or '').upper()
+                ow = float(calc._get_opening_width(opening) or 0.0)
+                oh = float(calc._get_opening_height(opening) or 0.0)
+                qtys = calc._get_attr(opening, 'room_quantities', {}) or {}
+                q = int(qtys.get(room_name, 1) or 1)
+                area = ow * oh * q
+                if otype == 'DOOR':
+                    doors_area += area
+                elif otype == 'WINDOW':
+                    windows_area += area
+        except Exception:
+            pass
+
         # Sync back to room model for display (deprecated fields)
         try:
             room_adapted = RoomAdapter(room)
@@ -2470,20 +2694,20 @@ class RoomManagerTab:
             pass
 
         return {
-            'perimeter': metrics.perimeter,
-            'wall_height': metrics.wall_height,
-            'walls_gross': metrics.walls_gross,
-            'doors_area': metrics.doors_area,
-            'windows_area': metrics.windows_area,
-            'openings_total': metrics.openings_area,
-            'walls_net': metrics.wall_finish_net,
-            'plaster': metrics.plaster_total,
-            'cer_wall': metrics.ceramic_wall,
-            'cer_floor': metrics.ceramic_floor,
-            'cer_ceiling': metrics.ceramic_ceiling,
-            'walls_paint': metrics.walls_paint_net,
-            'ceiling_paint': metrics.ceiling_paint,
-            'total_paint': metrics.paint_total
+            'perimeter': perimeter,
+            'wall_height': wall_height,
+            'walls_gross': float(room_calc.walls_gross or 0.0),
+            'doors_area': float(doors_area or 0.0),
+            'windows_area': float(windows_area or 0.0),
+            'openings_total': float(room_calc.walls_openings or 0.0),
+            'walls_net': float(room_calc.walls_net or 0.0),
+            'plaster': float(room_calc.plaster_total or 0.0),
+            'cer_wall': float(room_calc.ceramic_wall or 0.0),
+            'cer_floor': float(room_calc.ceramic_floor or 0.0),
+            'cer_ceiling': float(room_calc.ceramic_ceiling or 0.0),
+            'walls_paint': float(room_calc.paint_walls or 0.0),
+            'ceiling_paint': float(room_calc.paint_ceiling or 0.0),
+            'total_paint': float(room_calc.paint_total or 0.0)
         }
 
     def _update_room_metrics_ui(self, m):
@@ -3392,19 +3616,33 @@ class RoomManagerTab:
             return
 
         room = self.selected_room
-        # Handle both dict and object
-        if isinstance(room, dict):
-            breakdown = room.get('ceramic_breakdown', {})
-            total = room.get('ceramic_area', 0.0)
-        else:
-            breakdown = getattr(room, 'ceramic_breakdown', {})
-            total = getattr(room, 'ceramic_area', 0.0)
+        room_name = room.get('name', '') if isinstance(room, dict) else getattr(room, 'name', '')
 
-        if not breakdown and total == 0:
+        # SSOT: Always compute using UnifiedCalculator so it matches Excel/Quantities.
+        try:
+            from ...calculations.unified_calculator import UnifiedCalculator
+            calc = UnifiedCalculator(self.app.project)
+            cer = (calc.calculate_ceramic_by_room() or {}).get(room_name, {})
+            breakdown = {
+                'wall': float(cer.get('wall', 0.0) or 0.0),
+                'ceiling': float(cer.get('ceiling', 0.0) or 0.0),
+                'floor': float(cer.get('floor', 0.0) or 0.0),
+            }
+            total = breakdown['wall'] + breakdown['ceiling'] + breakdown['floor']
+        except Exception:
+            # Fallback to stored values if calculator fails for any reason.
+            if isinstance(room, dict):
+                breakdown = room.get('ceramic_breakdown', {})
+                total = room.get('ceramic_area', 0.0)
+            else:
+                breakdown = getattr(room, 'ceramic_breakdown', {})
+                total = getattr(room, 'ceramic_area', 0.0)
+
+        if not breakdown and float(total or 0.0) == 0:
             messagebox.showinfo("تفاصيل السيراميك", "لا يوجد سيراميك في هذه الغرفة.")
             return
 
-        msg = f"إجمالي السيراميك: {total:.2f} م²\n\n"
+        msg = f"إجمالي السيراميك: {float(total or 0.0):.2f} م²\n\n"
         msg += "التفاصيل:\n"
         
         translations = {
@@ -3606,6 +3844,9 @@ class RoomManagerTab:
         # Keyed by stable room iid to avoid duplicate-name collisions
         room_selection = {}  # room_key -> {...}
         current_room_name = tk.StringVar(value="")  # stores room_key
+
+        # Default selection should be scoped to the room the user opened the dialog from.
+        selected_room_key = f"room-{id(self.selected_room)}" if getattr(self, 'selected_room', None) is not None else ""
         
         # Populate rooms
         def populate_rooms(filter_type='الكل'):
@@ -3634,8 +3875,8 @@ class RoomManagerTab:
                 
                 # Initialize selection state
                 if room_key not in room_selection:
-                    # Default: select kitchen, bath, toilet, balcony
-                    default_selected = rtype in ['kitchen', 'bath', 'toilet', 'balcony']
+                    # Default: select ONLY the current room to avoid applying to other rooms unintentionally.
+                    default_selected = bool(selected_room_key and room_key == selected_room_key)
                     default_height = {'kitchen': 1.5, 'bath': 2.4, 'toilet': 1.5, 'balcony': 1.2}.get(rtype, 1.5)
                     room_selection[room_key] = {
                         'selected': default_selected,
@@ -3658,6 +3899,15 @@ class RoomManagerTab:
         rooms_tree.tag_configure('selected', background='#2d4a5e')
         
         populate_rooms()
+
+        # Focus the current room to reduce accidental multi-room application
+        if selected_room_key and selected_room_key in rooms_tree.get_children(''):
+            try:
+                rooms_tree.selection_set(selected_room_key)
+                rooms_tree.see(selected_room_key)
+                current_room_name.set(selected_room_key)
+            except Exception:
+                pass
         
         def on_filter_change(*_):
             populate_rooms(filter_var.get())
@@ -3699,11 +3949,10 @@ class RoomManagerTab:
         def apply_quick_height():
             try:
                 h = float(quick_height_var.get())
-                for child in walls_canvas_inner.winfo_children():
-                    for widget in child.winfo_children():
-                        if isinstance(widget, ttk.Entry):
-                            widget.delete(0, tk.END)
-                            widget.insert(0, str(h))
+                # Apply to tracked height variables (widget tree-walking is unreliable due to nesting)
+                for enabled_var, height_var, _wall in wall_controls:
+                    if enabled_var.get():
+                        height_var.set(str(h))
             except:
                 pass
         
@@ -3799,19 +4048,31 @@ class RoomManagerTab:
                 info_frame.pack(fill=tk.X)
                 
                 w_length = wall_attr(wall, 'length', 0.0)
-                w_height = wall_attr(wall, 'height', room_data['default_height'])
+                wall_height = wall_attr(wall, 'height', None)
+                try:
+                    wall_height = float(wall_height) if wall_height is not None else float(adapter.wall_height or room_data['default_height'])
+                except Exception:
+                    wall_height = float(room_data['default_height'])
+
+                ceramic_h = wall_attr(wall, 'ceramic_height', 0.0)
+                try:
+                    ceramic_h = float(ceramic_h or 0.0)
+                except Exception:
+                    ceramic_h = 0.0
+                if ceramic_h <= 0:
+                    ceramic_h = float(room_data['default_height'])
 
                 # Apply saved state if exists (enabled, height) for this index
                 if i < len(saved_walls):
                     try:
                         saved_enabled, saved_h, _ = saved_walls[i]
                         if saved_h:
-                            w_height = float(saved_h)
+                            ceramic_h = float(saved_h)
                     except Exception:
                         pass
                 ttk.Label(
                     info_frame,
-                    text=f"📏 الطول: {w_length:.2f} م  |  الارتفاع: {w_height:.2f} م  |  المساحة الحالية: {w_length * w_height:.2f} م²",
+                    text=f"📏 الطول: {w_length:.2f} م  |  ارتفاع الجدار: {wall_height:.2f} م  |  مساحة السيراميك الحالية: {w_length * ceramic_h:.2f} م²",
                     foreground=self.app.colors['text_secondary']
                 ).pack(side=tk.LEFT)
                 
@@ -3836,7 +4097,7 @@ class RoomManagerTab:
                 
                 # Height input
                 ttk.Label(controls_frame, text="ارتفاع السيراميك:").pack(side=tk.LEFT, padx=(16, 4))
-                height_val = w_height if w_height else room_data['default_height']
+                height_val = ceramic_h
                 height_var = tk.StringVar(value=str(height_val))
                 height_entry = ttk.Entry(controls_frame, textvariable=height_var, width=8)
                 height_entry.pack(side=tk.LEFT)
@@ -3894,6 +4155,14 @@ class RoomManagerTab:
                 load_room_walls(room_name)
         
         rooms_tree.bind('<<TreeviewSelect>>', on_room_select)
+
+        # If we preselected the current room above, load its walls now.
+        try:
+            _initial_key = current_room_name.get()
+            if _initial_key and _initial_key in room_selection:
+                load_room_walls(_initial_key)
+        except Exception:
+            pass
         
         # Summary panel
         summary_frame = ttk.LabelFrame(main_frame, text="📊 ملخص", padding=8)
@@ -4566,7 +4835,7 @@ class RoomManagerTab:
         self.app.update_status(f"Auto calculated finishes for '{room_name}'", icon="🔄")
     
     def _auto_update_all_rooms(self):
-        """Recalculate all room deductions (openings, ceramics) for all rooms."""
+        """Recalculate all room deductions (openings, ceramics) for all rooms using UnifiedCalculator."""
         if not self.app.project.rooms:
             messagebox.showinfo("No Rooms", "No rooms to update.")
             return
@@ -4575,63 +4844,49 @@ class RoomManagerTab:
         total_rooms = len(self.app.project.rooms)
         confirm = messagebox.askyesno(
             "Auto Update All Rooms",
-            f"This will recalculate openings deductions and ceramic areas for all {total_rooms} rooms.\n\n"
+            f"This will recalculate openings deductions and ceramic areas for all {total_rooms} rooms using the Unified Calculator.\n\n"
             "Continue?",
             icon='question'
         )
         if not confirm:
             return
         
-        updated_count = 0
-        skipped_count = 0
+        # Use UnifiedCalculator
+        calc = UnifiedCalculator(self.app.project)
+        results = calc.calculate_all_rooms()
         
-        for room in self.app.project.rooms:
-            room_dict = room.to_dict() if hasattr(room, 'to_dict') else room
-            wall_h = float(room_dict.get('wall_height', 0.0) or 0.0)
+        updated_count = 0
+        
+        # Map results back to rooms
+        for i, room in enumerate(self.app.project.rooms):
+            # Find result for this room
+            room_name = self.app._room_name(room)
+            res = next((r for r in results if r.room_name == room_name), None)
             
-            # Skip rooms without wall height
-            if wall_h <= 0:
-                skipped_count += 1
+            if not res:
                 continue
             
-            # Determine gross walls
-            perim = float(room_dict.get('perim', 0.0) or 0.0)
-            segments = room_dict.get('wall_segments') if room_dict.get('is_balcony') else []
-            if segments:
-                gross = 0.0
-                for seg in segments:
-                    try:
-                        gross += float(seg.get('length', 0.0) or 0.0) * float(seg.get('height', 0.0) or 0.0)
-                    except Exception:
-                        pass
-            else:
-                gross = perim * wall_h if wall_h > 0 else 0.0
+            # Update room attributes
+            breakdown = {
+                'wall': res.ceramic_wall,
+                'ceiling': res.ceramic_ceiling,
+                'floor': res.ceramic_floor,
+            }
             
-            # Opening deduction
-            try:
-                opening_area = self.app.association.calculate_room_opening_area(room)
-            except Exception:
-                opening_area = 0.0
-            
-            net_wall = max(0.0, gross - opening_area)
-            
-            # Update room
             if isinstance(room, dict):
-                room['wall_finish_area'] = net_wall
+                room['wall_finish_area'] = res.walls_net
+                room['ceiling_finish_area'] = res.ceiling_area
+                room['plaster_area'] = res.plaster_total
+                room['paint_area'] = res.paint_total
+                room['ceramic_area'] = res.ceramic_wall + res.ceramic_ceiling + res.ceramic_floor
+                room['ceramic_breakdown'] = breakdown
             else:
-                room.wall_finish_area = net_wall
-            
-            # Recompute plaster/paint
-            try:
-                self.app._recompute_room_finish(room)
-            except Exception:
-                pass
-            
-            # Recalculate ceramic with openings (if applicable)
-            try:
-                self._recalculate_room_ceramic_with_openings(room)
-            except Exception:
-                pass
+                room.wall_finish_area = res.walls_net
+                room.ceiling_finish_area = res.ceiling_area
+                room.plaster_area = res.plaster_total
+                room.paint_area = res.paint_total
+                room.ceramic_area = res.ceramic_wall + res.ceramic_ceiling + res.ceramic_floor
+                room.ceramic_breakdown = breakdown
             
             updated_count += 1
         
@@ -4641,9 +4896,7 @@ class RoomManagerTab:
         if self.selected_room:
             self._load_room_details(self.selected_room)
         
-        msg = f"Updated {updated_count} room(s)"
-        if skipped_count > 0:
-            msg += f" (skipped {skipped_count} without wall height)"
+        msg = f"Updated {updated_count} room(s) using Unified Calculator"
         self.app.update_status(msg, icon="⚡")
         messagebox.showinfo("Auto Update Complete", msg)
         

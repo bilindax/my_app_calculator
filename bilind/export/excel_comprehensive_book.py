@@ -1,1206 +1,963 @@
 """
 Comprehensive Quantity Book Export
 ==================================
-Exports a multi-sheet Excel workbook covering all project quantities in detail.
-Designed for professional quantity surveying (QS).
+Refactored to strictly adhere to Single Source of Truth (UnifiedCalculator).
 """
-
-from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
-from typing import Any, Callable, Optional, List, Dict
+from datetime import datetime
+from typing import Any, Callable, Optional, List
 
-# ===== STYLES =====
-COLOR_HEADER_BG = "1F4E78"  # Dark Blue
+# ... (Keep existing Style constants: COLOR_HEADER_BG, FONT_HEADER, etc.) ...
+COLOR_HEADER_BG = "1F4E78"
 COLOR_HEADER_FG = "FFFFFF"
-COLOR_SUBTOTAL_BG = "DDEBF7"
 COLOR_TOTAL_BG = "BDD7EE"
-
 FONT_HEADER = Font(name='Segoe UI', bold=True, size=11, color=COLOR_HEADER_FG)
 FONT_NORMAL = Font(name='Segoe UI', size=10)
 FONT_BOLD = Font(name='Segoe UI', bold=True, size=10)
-
-BORDER_THIN = Border(
-    left=Side(style='thin', color='BFBFBF'),
-    right=Side(style='thin', color='BFBFBF'),
-    top=Side(style='thin', color='BFBFBF'),
-    bottom=Side(style='thin', color='BFBFBF')
-)
-
+BORDER_THIN = Border(left=Side(style='thin',color='BFBFBF'), right=Side(style='thin',color='BFBFBF'), top=Side(style='thin',color='BFBFBF'), bottom=Side(style='thin',color='BFBFBF'))
 ALIGN_CENTER = Alignment(horizontal='center', vertical='center', wrap_text=True)
-ALIGN_RIGHT = Alignment(horizontal='right', vertical='center', wrap_text=True) # For numbers
-ALIGN_LEFT = Alignment(horizontal='left', vertical='center', wrap_text=True)   # For text (Arabic is RTL, but cell align left usually means start)
 
-def setup_sheet(ws, title, is_rtl=True):
+def setup_sheet(ws, title):
     ws.title = title
-    if is_rtl:
-        ws.sheet_view.rightToLeft = True
+    ws.sheet_view.rightToLeft = True
     ws.sheet_view.showGridLines = False
 
-def write_header(ws, headers, row=1):
+def write_header(ws, headers):
     for col, text in enumerate(headers, 1):
-        cell = ws.cell(row=row, column=col, value=text)
-        cell.font = FONT_HEADER
-        cell.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
-        cell.alignment = ALIGN_CENTER
-        cell.border = BORDER_THIN
+        c = ws.cell(row=1, column=col, value=text)
+        c.font = FONT_HEADER; c.fill = PatternFill(start_color=COLOR_HEADER_BG, end_color=COLOR_HEADER_BG, fill_type="solid")
+        c.alignment = ALIGN_CENTER; c.border = BORDER_THIN
 
-def write_row(ws, row_idx, data, center_cols=None):
+def write_row(ws, row, data):
     for col, val in enumerate(data, 1):
-        cell = ws.cell(row=row_idx, column=col, value=val)
-        cell.font = FONT_NORMAL
-        cell.border = BORDER_THIN
-        
-        # Alignment
-        if center_cols and col in center_cols:
-            cell.alignment = ALIGN_CENTER
-        elif isinstance(val, (int, float)):
-            cell.alignment = ALIGN_CENTER # Numbers center usually looks okay, or right
-            if isinstance(val, float):
-                cell.number_format = '0.00'
-        else:
-            cell.alignment = ALIGN_CENTER # Default center for Arabic text often looks better in tables
+        c = ws.cell(row=row, column=col, value=val)
+        c.font = FONT_NORMAL; c.border = BORDER_THIN; c.alignment = ALIGN_CENTER
+        if isinstance(val, (int, float)): c.number_format = '0.00'
 
 def auto_fit(ws):
     for column in ws.columns:
-        max_length = 0
-        column_letter = get_column_letter(column[0].column)
-        for cell in column:
-            try:
-                if cell.value:
-                    val_len = len(str(cell.value))
-                    if '\n' in str(cell.value):
-                        val_len = max(len(line) for line in str(cell.value).split('\n'))
-                    max_length = max(max_length, val_len)
-            except:
-                pass
-        adjusted_width = min(max_length + 4, 50)
-        ws.column_dimensions[column_letter].width = adjusted_width
+        ws.column_dimensions[get_column_letter(column[0].column)].width = 20
 
-def export_comprehensive_book(
-    project: Any,
-    filepath: str,
-    app: Any = None, # To access helper methods if needed
-    status_cb: Optional[Callable[[str, str], None]] = None,
-    selected_sheets: Optional[List[str]] = None
-) -> bool:
-    
+def export_comprehensive_book(project: Any, filepath: str, app: Any = None, status_cb = None, selected_sheets = None) -> bool:
+    if not filepath:
+        # Backward-compatible: allow callers to omit filepath and prompt via app.
+        if app and hasattr(app, '_ask_save_path'):
+            filepath = app._ask_save_path('دفتر_الكميات_الشامل.xlsx', 'excel')
+        if not filepath:
+            return False
+
     if status_cb:
-        status_cb("Generating Comprehensive Book...", "📊")
-
-    wb = openpyxl.Workbook()
-    # Remove default sheet if we are going to create specific ones
-    if selected_sheets:
-        wb.remove(wb.active)
+        status_cb("Generating Book...", "📊")
     
-    # Helper to safely get attributes
-    def val(obj, attr, default=None):
-        if isinstance(obj, dict):
-            return obj.get(attr, default)
-        return getattr(obj, attr, default)
-    
-    # Helper to get perimeter (handles 'perimeter' and 'perim' variants)
-    def get_perim(room):
-        if isinstance(room, dict):
-            return float(room.get('perimeter', 0.0) or room.get('perim', 0.0) or 0.0)
-        p = getattr(room, 'perimeter', 0.0)
-        if not p:
-            p = getattr(room, 'perim', 0.0)
-        return float(p or 0.0)
-
-    # Helper to get opening width (handles 'width' and 'w' variants)
-    def get_opening_width(opening):
-        if isinstance(opening, dict):
-            # Check 'w' first (primary key from build_opening_record), then 'width'
-            v = opening.get('w')
-            if v is None or v == 0:
-                v = opening.get('width')
-            return float(v or 0.0)
-        # For objects, check both attributes
-        w = getattr(opening, 'w', None)
-        if w is None or w == 0:
-            w = getattr(opening, 'width', 0.0)
-        return float(w or 0.0)
-
-    # Helper to get opening height (handles 'height' and 'h' variants)
-    def get_opening_height(opening):
-        if isinstance(opening, dict):
-            # Check 'h' first (primary key from build_opening_record), then 'height'
-            v = opening.get('h')
-            if v is None or v == 0:
-                v = opening.get('height')
-            return float(v or 0.0)
-        # For objects, check both attributes
-        h = getattr(opening, 'h', None)
-        if h is None or h == 0:
-            h = getattr(opening, 'height', 0.0)
-        return float(h or 0.0)
-
-    # Helper to get opening quantity (handles 'quantity' and 'qty' variants)
-    def get_opening_qty(opening):
-        if isinstance(opening, dict):
-            # Check 'qty' first (primary key from build_opening_record), then 'quantity'
-            v = opening.get('qty')
-            if v is None or v == 0:
-                v = opening.get('quantity')
-            return int(v or 1)
-        # For objects, check both attributes
-        q = getattr(opening, 'qty', None)
-        if q is None or q == 0:
-            q = getattr(opening, 'quantity', 1)
-        return int(q or 1)
-
-    # Helper to deduplicate openings by name and drop invalid/zero-qty ones
-    def unique_openings(openings):
-        seen = set()
-        result = []
-        for o in openings or []:
-            name = val(o, 'name', '-')
-            qty = get_opening_qty(o)
-            if not name or name in seen or qty <= 0:
-                continue
-            seen.add(name)
-            result.append(o)
-        return result
-
-    # Helper to check if sheet should be generated
-    def should_gen(key):
-        if not selected_sheets: return True
-        return key in selected_sheets
-
-    # Build a set of valid wall identifiers (room_name, wall_name) from actual room.walls
-    def get_valid_wall_keys():
-        """Returns a set of (room_name, wall_name) tuples for existing walls."""
-        import re
-        valid_keys = set()
-        for room in project.rooms:
-            room_name = val(room, 'name', '')
-            walls = val(room, 'walls', []) or []
-            for i, w in enumerate(walls):
-                w_name = val(w, 'name', f'Wall {i+1}')
-                valid_keys.add((room_name, w_name))
-                # Also extract wall number for pattern matching
-                num_match = re.search(r'(\d+)', w_name)
-                if num_match:
-                    # Add Arabic pattern variant
-                    valid_keys.add((room_name, f"جدار {num_match.group(1)}"))
-        return valid_keys
-    
-    def get_wall_length_from_room(room_name: str, wall_name: str) -> float:
-        """Get actual wall length from room.walls by name."""
-        import re
-        for room in project.rooms:
-            if val(room, 'name', '') != room_name:
-                continue
-            walls = val(room, 'walls', []) or []
-            for i, w in enumerate(walls):
-                w_name = val(w, 'name', f'Wall {i+1}')
-                if w_name == wall_name:
-                    return float(val(w, 'length', 0.0) or 0.0)
-                # Also check by wall number
-                num_match = re.search(r'(\d+)', wall_name)
-                w_num_match = re.search(r'(\d+)', w_name)
-                if num_match and w_num_match and num_match.group(1) == w_num_match.group(1):
-                    return float(val(w, 'length', 0.0) or 0.0)
-        return 0.0
-    
-    def fix_ceramic_zone_data(zone):
-        """Fix ceramic zone with missing perimeter by reading from actual wall."""
-        import re
-        surface_type = val(zone, 'surface_type', 'wall')
-        if surface_type != 'wall':
-            return zone  # Only fix wall zones
-        
-        perim = float(val(zone, 'perimeter', 0.0) or 0.0)
-        
-        # Try to find actual wall length
-        z_room = val(zone, 'room_name', '')
-        z_wall = val(zone, 'wall_name', '')
-        z_name = val(zone, 'name', '')
-        z_height = float(val(zone, 'height', 0.0) or 0.0)
-        
-        # Find the room to check room perimeter
-        room_obj = None
-        room_perim = 0.0
-        if z_room:
-            for r in project.rooms:
-                if val(r, 'name', '') == z_room:
-                    room_obj = r
-                    room_perim = get_perim(r)
-                    break
-        
-        actual_length = 0.0
-        
-        # Method 1: Use wall_name directly
-        if z_wall and z_room:
-            actual_length = get_wall_length_from_room(z_room, z_wall)
-        
-        # Method 2: Extract wall number from zone name
-        if actual_length <= 0 and z_room:
-            num_match = re.search(r'(?:جدار|Wall)\s*(\d+)', z_name, re.IGNORECASE)
-            if num_match:
-                wall_num = num_match.group(1)
-                # Try both naming conventions
-                actual_length = get_wall_length_from_room(z_room, f"Wall {wall_num}")
-                if actual_length <= 0:
-                    actual_length = get_wall_length_from_room(z_room, f"جدار {wall_num}")
-        
-        # DECISION: When to update?
-        # 1. If perimeter is 0 (missing)
-        # 2. If perimeter equals room perimeter BUT actual wall is smaller (bug fix for 15.7 issue)
-        should_update = False
-        if actual_length > 0:
-            if perim <= 0.001:
-                should_update = True
-            elif room_perim > 0 and abs(perim - room_perim) < 0.01 and abs(actual_length - room_perim) > 0.01:
-                # Zone has room perimeter, but wall is different -> Fix it
-                should_update = True
-        
-        if should_update:
-            # Create fixed copy
-            if isinstance(zone, dict):
-                fixed = zone.copy()
-                fixed['perimeter'] = actual_length
-                fixed['area'] = actual_length * z_height
-                fixed['adhesive_kg'] = (actual_length * z_height) * 3.0  # Wall adhesive rate
-                fixed['grout_kg'] = (actual_length * z_height) * 0.5
-                return fixed
-            else:
-                # For object, just update and return
-                zone.perimeter = actual_length
-                zone.area = actual_length * z_height
-                zone.adhesive_kg = zone.area * 3.0
-                zone.grout_kg = zone.area * 0.5
-                return zone
-        
-        return zone
-    
-    def filter_orphan_ceramic_zones(zones):
-        """Filter out ceramic wall zones that reference deleted walls."""
-        import re
-        valid_keys = get_valid_wall_keys()
-        filtered = []
-        
-        for z in zones:
-            surface_type = val(z, 'surface_type', 'wall')
-            
-            # Non-wall zones pass through (floor, ceiling)
-            if surface_type != 'wall':
-                filtered.append(z)
-                continue
-            
-            z_room = val(z, 'room_name', '')
-            z_wall = val(z, 'wall_name', '')
-            z_name = val(z, 'name', '')
-            
-            # Check 1: Direct wall_name match
-            if z_wall and (z_room, z_wall) in valid_keys:
-                filtered.append(fix_ceramic_zone_data(z))  # Fix data if needed
-                continue
-            
-            # Check 2: Extract wall number from zone name and validate
-            # Pattern: "سيراميك - RoomName - جدار N" or "... - Wall N"
-            num_match = re.search(r'(?:جدار|Wall)\s*(\d+)', z_name, re.IGNORECASE)
-            if num_match and z_room:
-                wall_num = num_match.group(1)
-                if (z_room, f"جدار {wall_num}") in valid_keys or (z_room, f"Wall {wall_num}") in valid_keys:
-                    filtered.append(fix_ceramic_zone_data(z))  # Fix data if needed
-                    continue
-            
-            # Zone doesn't match any existing wall - skip it (orphaned)
-            # print(f"[EXPORT] Skipping orphan ceramic zone: {z_name}")
-        
-        return filtered
-
-    # Openings Lookup (needed by all sections)
-    openings_map = {val(o, 'name'): o for o in project.doors + project.windows}
-
-    # ==================== USE UNIFIED CALCULATOR ====================
-    # Single Source of Truth - all calculations from one place
+    # 1. INITIALIZE SSOT
     from ..calculations.unified_calculator import UnifiedCalculator
-    
     calc = UnifiedCalculator(project)
     
-    # Pre-calculate ceramic values per room (shared by all sections)
-    ceramic_by_room = calc.calculate_ceramic_by_room()
-    
-    # Pre-calculate all room metrics (for validation)
-    all_room_calcs = calc.calculate_all_rooms()
+    # Pre-calculate EVERYTHING
     project_totals = calc.calculate_totals()
-    # ================================================================
-
-    # 1. SUMMARY (ملخص)
-    if should_gen('summary'):
-        if not wb.sheetnames:
-            ws_sum = wb.create_sheet("ملخص المشروع")
-        else:
-            ws_sum = wb.create_sheet("ملخص المشروع")
-        
-        setup_sheet(ws_sum, "ملخص المشروع")
+    all_rooms_data = calc.calculate_all_rooms()
+    rooms_map = {r.room_name: r for r in all_rooms_data} # Fast Lookup
     
-        ws_sum['B2'] = "ملخص كميات المشروع"
-        ws_sum['B2'].font = Font(name='Segoe UI', size=18, bold=True, color=COLOR_HEADER_BG)
-        ws_sum['B2'].alignment = Alignment(horizontal='right')
-        
-        ws_sum['B3'] = f"تاريخ التقرير: {datetime.now().strftime('%Y-%m-%d')}"
-        
-        # ==================== USE UNIFIED CALCULATOR ====================
-        # Get all totals from UnifiedCalculator (already calculated above)
-        total_rooms = len(project.rooms)
-        total_area = sum(float(val(r, 'area', 0.0) or 0.0) for r in project.rooms)
-        
-        tot_plaster = project_totals['plaster_total']
-        tot_paint = project_totals['paint_total']
-        tot_ceramic_wall = project_totals['ceramic_wall'] + project_totals['ceramic_ceiling']
-        tot_ceramic_floor = project_totals['ceramic_floor']
-        tot_ceramic_net = project_totals['ceramic_total']
-        tot_baseboard = project_totals['baseboard_total']
-        # ================================================================
-        
-        # Stone calculation (still needs manual loop - not part of core calculations)
-        tot_stone_linear = 0.0
-        for o in unique_openings(project.doors + project.windows):
-            qty = get_opening_qty(o)
-            w = get_opening_width(o)
-            h = get_opening_height(o)
-            
-            # Correct Stone Perimeter Logic
-            # Doors: 2 sides + top (2h + w)
-            # Windows: 4 sides (2h + 2w)
-            if str(val(o, 'opening_type', '')).upper() == 'DOOR':
-                perim_one = (2 * h) + w
-            else:
-                perim_one = 2 * (w + h)
-                
-            tot_stone_linear += (perim_one * qty)
+    wb = openpyxl.Workbook()
+    # We'll always generate our own sheets; remove default placeholder.
+    try:
+        wb.remove(wb.active)
+    except Exception:
+        pass
+    
+    def val(obj, attr, default=None):
+        return obj.get(attr, default) if isinstance(obj, dict) else getattr(obj, attr, default)
 
-        summary_data = [
-            ("عدد الغرف", total_rooms, "غرفة"),
-            ("مساحة الأرضيات الإجمالية", total_area, "م²"),
-            ("أعمال الزريقة (لياسة)", tot_plaster, "م²"),
-            ("أعمال الدهان", tot_paint, "م²"),
-            ("سيراميك الجدران", tot_ceramic_wall, "م²"),
-            ("سيراميك الأرضيات", tot_ceramic_floor, "م²"),
-            ("سيراميك (إجمالي صافي)", tot_ceramic_net, "م²"),
-            ("نعلات (وزرات)", tot_baseboard, "م.ط"),
-            ("حجر (إطارات فتحات)", tot_stone_linear, "م.ط"),
-        ]
-        
-        r_idx = 5
-        for title, val_num, unit in summary_data:
-            ws_sum.cell(row=r_idx, column=2, value=title).font = FONT_BOLD
-            ws_sum.cell(row=r_idx, column=3, value=val_num).number_format = '0.00'
-            ws_sum.cell(row=r_idx, column=4, value=unit)
-            r_idx += 1
-            
-        auto_fit(ws_sum)
+    def fnum(x: Any) -> float:
+        try:
+            return float(x or 0.0)
+        except Exception:
+            return 0.0
 
-    # 2. ROOMS (الغرف)
-    if should_gen('rooms'):
-        ws_rooms = wb.create_sheet("مساحة الغرف")
-        setup_sheet(ws_rooms, "مساحة الغرف")
-        headers_rooms = [
-            "م", "اسم الغرفة", "نوع الغرفة", "الطابق", "الأبعاد", "المحيط (م)", "الارتفاع (م)",
-            "مساحة الأرضية (م²)", "مساحة الجدران القائمة (م²)", "مساحة الفتحات (م²)", "مساحة الجدران الصافية (م²)",
-            "نعلات (م.ط)", "سيراميك جدران (م²)", "سيراميك أرضيات (م²)", "سيراميك سقف (م²)",
-            "ملاحظات"
-        ]
-        write_header(ws_rooms, headers_rooms)
-        
-        r_idx = 2
-        total_floor_area = 0.0
-        total_walls_gross = 0.0
-        total_walls_net = 0.0
-        total_openings_area = 0.0
-        total_baseboard = 0.0
-        total_c_wall = 0.0
-        total_c_floor = 0.0
-        total_c_ceil = 0.0
-        
-        for i, r in enumerate(project.rooms, 1):
-            name = val(r, 'name', '-')
-            room_type = val(r, 'room_type', '[غير محدد]') or '[غير محدد]'
-            floor = val(r, 'floor', 0)
-            w = float(val(r, 'width', 0.0) or 0.0)
-            l = float(val(r, 'length', 0.0) or 0.0)
-            
-            # Perimeter Logic: Check 'perimeter' then 'perim'
-            perim = get_perim(r)
-            
-            note = ""
-            walls = val(r, 'walls', []) or []
+    def get_opening_area(o: Any) -> float:
+        # Prefer model's computed area if available.
+        area = val(o, 'area', None)
+        if area is not None:
+            return fnum(area)
+        w = fnum(val(o, 'width', None) or val(o, 'w', 0.0))
+        h = fnum(val(o, 'height', None) or val(o, 'h', 0.0))
+        qty = int(val(o, 'quantity', None) or val(o, 'qty', 1) or 1)
+        return max(0.0, w * h * qty)
 
-            # Heuristic: if there are many wall edges, treat the room as irregular for reporting.
-            # This avoids misleading width/length (often bounding-box-derived) for non-rectangles.
-            is_irregular = len(walls) > 4
+    def get_opening_stone(o: Any) -> float:
+        stone = val(o, 'stone', None)
+        if stone is not None:
+            return fnum(stone)
+        w = fnum(val(o, 'width', None) or val(o, 'w', 0.0))
+        h = fnum(val(o, 'height', None) or val(o, 'h', 0.0))
+        qty = int(val(o, 'quantity', None) or val(o, 'qty', 1) or 1)
+        # Match UnifiedCalculator.calculate_stone() behavior.
+        otype = str(val(o, 'opening_type', '') or '').upper()
+        if otype == 'DOOR':
+            perim_each = (2 * h) + w
+        else:
+            perim_each = 2 * (h + w)
+        return max(0.0, perim_each * qty)
 
-            # Normalize displayed W/L ordering (always show smaller×larger)
-            w_disp, l_disp = (min(w, l), max(w, l)) if (w > 0 and l > 0) else (0.0, 0.0)
+    # Detailed-books helpers (local to exporter)
+    from ..calculations.helpers import safe_zone_area
 
-            if (w > 0 and l > 0) and not is_irregular:
-                dims = f"{w_disp:.2f}×{l_disp:.2f}"
-            else:
-                # Irregular shape: list wall lengths (more informative than W/L)
-                if walls:
-                    wall_lens = [f"{float(val(wl, 'length', 0.0)):.2f}" for wl in walls]
-                    dims = "+".join(wall_lens)
-                    if len(dims) > 30:
-                        dims = dims[:27] + "..."
-                    note = "شكل غير منتظم (أطوال الأضلاع)"
+    def norm_text(x: Any) -> str:
+        try:
+            return str(x or '').strip().lower()
+        except Exception:
+            return ''
+
+    def opening_area_each(o: Any) -> float:
+        # area_each if available, else width*height
+        ae = val(o, 'area_each', None)
+        if ae is not None:
+            return fnum(ae)
+        w = fnum(val(o, 'width', None) or val(o, 'w', 0.0))
+        h = fnum(val(o, 'height', None) or val(o, 'h', 0.0))
+        return max(0.0, w * h)
+
+    def opening_rooms(o: Any) -> List[str]:
+        # Combine assigned_rooms + room.opening_ids references
+        name = str(val(o, 'name', '') or '').strip()
+        assigned = val(o, 'assigned_rooms', None) or []
+        seen = set()
+        out: List[str] = []
+        for rn in assigned:
+            rname = str(rn or '').strip()
+            if rname and rname not in seen:
+                seen.add(rname)
+                out.append(rname)
+        if name:
+            for r in getattr(project, 'rooms', []) or []:
+                rname = str(val(r, 'name', '') or '').strip()
+                ids = val(r, 'opening_ids', []) or []
+                if name in ids and rname and rname not in seen:
+                    seen.add(rname)
+                    out.append(rname)
+        return out
+
+    def opening_area_for_room(o: Any, room_name: str) -> float:
+        room_name = str(room_name or '').strip()
+        if not room_name:
+            return 0.0
+
+        # 1) room_quantities (strongest)
+        rq = val(o, 'room_quantities', None) or {}
+        if rq and room_name in rq:
+            qty = int(rq.get(room_name, 0) or 0)
+            return opening_area_each(o) * max(0, qty)
+
+        # 2) room_shares
+        shares = val(o, 'room_shares', None) or {}
+        if shares:
+            return get_opening_area(o) * max(0.0, fnum(shares.get(room_name, 0.0)))
+
+        # 3) assigned_rooms + share_mode
+        assigned = val(o, 'assigned_rooms', None) or []
+        mode = val(o, 'share_mode', None) or None
+        if assigned:
+            if room_name not in assigned:
+                return 0.0
+            if (mode or 'split') == 'single':
+                return get_opening_area(o) if room_name == str(assigned[0] or '').strip() else 0.0
+            return get_opening_area(o) / max(1, len(assigned))
+
+        # 4) fallback split among rooms that reference it in opening_ids
+        rooms_ref = opening_rooms(o)
+        if rooms_ref and room_name in rooms_ref:
+            return get_opening_area(o) / max(1, len(rooms_ref))
+
+        return 0.0
+
+    default_h = fnum(getattr(project, 'default_wall_height', 3.0) or 3.0)
+
+    def iter_room_walls(r: Any) -> List[Any]:
+        walls = val(r, 'walls', []) or []
+        if walls:
+            return list(walls)
+        perim = fnum(val(r, 'perimeter', 0.0) or val(r, 'perim', 0.0))
+        rh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0) or default_h)
+        if perim > 0 and rh > 0:
+            return [{
+                'name': 'محيط الغرفة',
+                'length': perim,
+                'height': rh,
+                '_pseudo': True,
+            }]
+        return []
+
+    def wall_name(w: Any, idx: int) -> str:
+        n = str(val(w, 'name', '') or '').strip()
+        return n if n else f"Wall {idx + 1}"
+
+    def wall_length(w: Any) -> float:
+        return max(0.0, fnum(val(w, 'length', 0.0)))
+
+    def wall_height(w: Any, r: Any) -> float:
+        wh = fnum(val(w, 'height', 0.0))
+        if wh > 0:
+            return wh
+        rh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+        return rh if rh > 0 else default_h
+
+    def allocate_capped(total: float, weights: List[float], caps: List[float]) -> (List[float], float):
+        """Allocate `total` across items proportionally by weights, capped by caps.
+
+        Returns (allocations, unallocated).
+        """
+        total = fnum(total)
+        caps_left = [max(0.0, fnum(c)) for c in caps]
+        wts = [max(0.0, fnum(w)) for w in weights]
+        alloc = [0.0 for _ in caps_left]
+        remaining = total
+        active = [i for i, c in enumerate(caps_left) if c > 0]
+        eps = 1e-9
+
+        while remaining > eps and active:
+            wsum = sum(wts[i] for i in active)
+            if wsum <= eps:
+                wsum = float(len(active))
+                for i in active:
+                    wts[i] = 1.0
+            exhausted = []
+            for i in active:
+                share = remaining * (wts[i] / wsum) if wsum > eps else 0.0
+                if share <= caps_left[i] + eps:
+                    alloc[i] += share
+                    caps_left[i] -= share
                 else:
-                    dims = "-"
-                    note = "شكل غير منتظم"
+                    alloc[i] += caps_left[i]
+                    remaining -= caps_left[i]
+                    caps_left[i] = 0.0
+                    exhausted.append(i)
+            # If we didn't exhaust anything, we're done
+            if not exhausted:
+                remaining = 0.0
+                break
+            active = [i for i in active if caps_left[i] > eps]
 
-                # If W/L exist, clarify they are approximate (usually from bounding box/estimate)
-                if w > 0 and l > 0:
-                    note = (note + " | " if note else "") + f"أبعاد تقريبية: {w_disp:.2f}×{l_disp:.2f}"
-                
-            h = float(val(r, 'wall_height', 0.0) or 3.0)
-            area = float(val(r, 'area', 0.0) or 0.0)
+        unallocated = max(0.0, remaining)
+        return alloc, unallocated
 
-            walls = val(r, 'walls', []) or []
-            walls_gross = 0.0
-            wall_heights_list = []
-            if walls:
-                for wl in walls:
-                    w_len = float(val(wl, 'length', 0.0) or 0.0)
-                    w_h = float(val(wl, 'height', h) or h)
-                    if w_len > 0 and w_h > 0:
-                        walls_gross += w_len * w_h
-                        wall_heights_list.append(f"{w_h:.2f}")
-            else:
-                walls_gross = perim * h
-            
-            # Openings & Baseboard Deductions
-            op_area = 0.0
-            door_width_deduct = 0.0
-            op_ids = val(r, 'opening_ids', []) or []
-            for oid in op_ids:
-                o = openings_map.get(oid)
-                if o:
-                    ow = get_opening_width(o)
-                    oh = get_opening_height(o)
-                    # Use room-specific quantity
-                    room_qtys = val(o, 'room_quantities', {}) or {}
-                    qty = int(room_qtys.get(name, 1))
-                    op_area += (ow * oh * qty)
-                    if str(val(o, 'opening_type', '')).upper() == 'DOOR':
-                        door_width_deduct += (ow * qty)
-            
-            walls_net = max(0, walls_gross - op_area)
-            baseboard_len = max(0, perim - door_width_deduct)
-            
-            # Ceramic
-            breakdown = val(r, 'ceramic_breakdown', {}) or {}
-            c_wall = float(breakdown.get('wall', 0.0) or 0.0)
-            c_floor = float(breakdown.get('floor', 0.0) or 0.0)
-            c_ceil = float(breakdown.get('ceiling', 0.0) or 0.0)
-            
-            if wall_heights_list and len(set(wall_heights_list)) > 1:
-                note = (note + " | " if note else "") + f"ارتفاعات: {' | '.join(wall_heights_list)}"
+    # Build per-room opening objects (support both room.opening_ids and opening.assigned_rooms)
+    all_openings = (getattr(project, 'doors', []) or []) + (getattr(project, 'windows', []) or [])
+    openings_by_name = {str(val(o, 'name', '') or '').strip(): o for o in all_openings if str(val(o, 'name', '') or '').strip()}
 
-            # Add to totals
-            total_floor_area += area
-            total_walls_gross += walls_gross
-            total_walls_net += walls_net
-            total_openings_area += op_area
-            total_baseboard += baseboard_len
-            total_c_wall += c_wall
-            total_c_floor += c_floor
-            total_c_ceil += c_ceil
-            
-            row_data = [
-                i, name, room_type, floor, dims, perim, h, 
-                area, walls_gross, op_area, walls_net,
-                baseboard_len, c_wall, c_floor, c_ceil,
-                note
-            ]
-            write_row(ws_rooms, r_idx, row_data)
-            r_idx += 1
-        
-        # Write totals row
-        ws_rooms.cell(row=r_idx, column=1, value="").font = FONT_BOLD
-        ws_rooms.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        
-        # Map totals to columns (1-based index)
-        # 8: Floor Area, 9: Walls Gross, 10: Openings, 11: Walls Net
-        # 12: Baseboard, 13: Cer Wall, 14: Cer Floor, 15: Cer Ceil
-        totals_map = {
-            8: total_floor_area,
-            9: total_walls_gross,
-            10: total_openings_area,
-            11: total_walls_net,
-            12: total_baseboard,
-            13: total_c_wall,
-            14: total_c_floor,
-            15: total_c_ceil
-        }
-        
-        for col, val_num in totals_map.items():
-            cell = ws_rooms.cell(row=r_idx, column=col, value=val_num)
-            cell.font = FONT_BOLD
-            cell.number_format = '0.00'
-            
-        for col in range(1, 17):
-            ws_rooms.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_rooms.cell(row=r_idx, column=col).border = BORDER_THIN
-        
-        auto_fit(ws_rooms)
+    room_openings_map = {}
+    for r in getattr(project, 'rooms', []) or []:
+        rname = str(val(r, 'name', '') or '').strip()
+        refs = []
+        for oid in (val(r, 'opening_ids', []) or []):
+            o = openings_by_name.get(str(oid or '').strip())
+            if o is not None:
+                refs.append(o)
+        for o in all_openings:
+            assigned = val(o, 'assigned_rooms', None) or []
+            room_shares = val(o, 'room_shares', None) or {}
+            room_qtys = val(o, 'room_quantities', None) or {}
+            if rname and (rname in assigned or rname in room_shares or rname in room_qtys):
+                refs.append(o)
+        dedup = {}
+        for o in refs:
+            nm = str(val(o, 'name', '') or '').strip()
+            if nm:
+                dedup[nm] = o
+        room_openings_map[rname] = list(dedup.values())
 
-    # 3. PLASTER (الزريقة)
-    if should_gen('plaster'):
-        ws_plaster = wb.create_sheet("أعمال الزريقة")
-        setup_sheet(ws_plaster, "أعمال الزريقة")
-        headers_plaster = [
-            "م", "الموقع / الغرفة", "العنصر", "الطول (م)", "الارتفاع (م)", "المساحة القائمة (م²)",
-            "خصم الفتحات (م²)", "سيراميك (م²)", "المساحة الصافية (م²)", "ملاحظات"
+    def ensure_sheet(key: str) -> bool:
+        return (not selected_sheets) or (key in (selected_sheets or []))
+
+    def add_totals_row(ws, row: int, label: str, value: float, unit: str = ""):
+        ws.cell(row=row, column=2, value=label).font = FONT_BOLD
+        ws.cell(row=row, column=3, value=float(value or 0.0)).number_format = '0.00'
+        if unit:
+            ws.cell(row=row, column=4, value=unit)
+    
+    # --- SHEET: SUMMARY ---
+    if ensure_sheet('summary'):
+        ws = wb.create_sheet("ملخص المشروع")
+        setup_sheet(ws, "ملخص المشروع")
+        
+        ws['B2'] = "ملخص الكميات (SSOT Verified)"; ws['B2'].font = FONT_HEADER
+        
+        doors = getattr(project, 'doors', []) or []
+        windows = getattr(project, 'windows', []) or []
+        doors_area = sum(get_opening_area(o) for o in doors)
+        windows_area = sum(get_opening_area(o) for o in windows)
+        openings_area = doors_area + windows_area
+        openings_count = len(doors) + len(windows)
+
+        tiles_items = getattr(project, 'tiles_items', []) or []
+        tiles_total = sum(fnum(val(i, 'area', 0.0)) for i in tiles_items)
+
+        baseboards_items = getattr(project, 'baseboards', []) or []
+        baseboards_items_total = sum(fnum(val(b, 'net_length_m', None) or val(b, 'length', None) or 0.0) for b in baseboards_items)
+
+        data = [
+            ("عدد الغرف", len(getattr(project, 'rooms', []) or []), ""),
+            ("مساحات الأرضيات (إجمالي)", project_totals.get('area_total', 0.0), "م²"),
+            ("أعمال الزريقة (SSOT)", project_totals.get('plaster_total', 0.0), "م²"),
+            ("أعمال الدهان (SSOT)", project_totals.get('paint_total', 0.0), "م²"),
+            ("سيراميك الجدران (SSOT)", project_totals.get('ceramic_wall', 0.0), "م²"),
+            ("سيراميك الأرضيات (SSOT)", project_totals.get('ceramic_floor', 0.0), "م²"),
+            ("إجمالي السيراميك (SSOT)", project_totals.get('ceramic_total', 0.0), "م²"),
+            ("نعلات (SSOT)", project_totals.get('baseboard_total', 0.0), "م.ط"),
+            ("حجر/أطر (SSOT)", project_totals.get('stone_total', 0.0), "م.ط"),
+            ("مساحة الفتحات (أبواب+شبابيك)", openings_area, "م²"),
+            ("عدد الفتحات (أبواب+شبابيك)", openings_count, ""),
+            ("بلاط الأرضيات (دفتر البنود)", tiles_total, "م²"),
+            ("نعلات (دفتر البنود)", baseboards_items_total, "م.ط"),
         ]
-        write_header(ws_plaster, headers_plaster)
+
+        for i, (k, v, u) in enumerate(data, 5):
+            add_totals_row(ws, i, k, v, u)
+            
+    # --- SHEET: ROOMS ---
+    if ensure_sheet('rooms'):
+        ws = wb.create_sheet("مساحة الغرف")
+        setup_sheet(ws, "مساحة الغرف")
+        write_header(ws, [
+            "م", "الغرفة", "النوع", "المحيط", "ارتفاع الجدار",
+            "مساحة الأرضية", "جدران قائمة", "خصم فتحات", "جدران صافية",
+            "زريقة جدران", "زريقة سقف", "دهان جدران", "دهان سقف",
+            "سيراميك جدران", "سيراميك أرضيات", "سيراميك سقف",
+            "نعلات", "حجر/أطر"
+        ])
+        
+        for i, r in enumerate(project.rooms, 2):
+            name = val(r, 'name', '-')
+            rtype = val(r, 'room_type', '')
+            perim = fnum(val(r, 'perimeter', 0.0))
+            # Wall height: check if room has multiple walls with different heights
+            walls = val(r, 'walls', [])
+            if walls and len(walls) > 1:
+                heights = set()
+                for w_item in walls:
+                    wh_val = fnum(val(w_item, 'height', 0.0))
+                    if wh_val <= 0:
+                        wh_val = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+                    if wh_val > 0:
+                        heights.add(round(wh_val, 2))
+                if len(heights) > 1:
+                    min_h = min(heights)
+                    max_h = max(heights)
+                    wh = f"{min_h:.2f}-{max_h:.2f}"  # Show range as text
+                elif heights:
+                    wh = next(iter(heights))
+                else:
+                    wh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+            else:
+                wh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+            # FETCH FROM SSOT
+            d = rooms_map.get(name)
+            
+            if d:
+                write_row(ws, i, [
+                    i-1, name, rtype, perim, wh,
+                    d.ceiling_area, d.walls_gross,
+                    d.walls_openings, d.walls_net,
+                    d.plaster_walls, d.plaster_ceiling,
+                    d.paint_walls, d.paint_ceiling,
+                    d.ceramic_wall, d.ceramic_floor, d.ceramic_ceiling,
+                    d.baseboard_length, d.stone_length
+                ])
+            else:
+                write_row(ws, i, [i-1, name, rtype, perim, wh] + [0] * 13)
+
+        auto_fit(ws)
+
+    # --- SHEET: PLASTER ---
+    if ensure_sheet('plaster'):
+        ws = wb.create_sheet("أعمال الزريقة")
+        setup_sheet(ws, "أعمال الزريقة")
+        write_header(ws, ["م", "الغرفة", "العنصر", "المساحة القائمة", "خصم", "الصافي"])
         
         r_idx = 2
-        seq = 1
-        total_gross_plaster = 0.0
-        total_op_deduct = 0.0
-        total_cer_deduct = 0.0
-        total_net_plaster = 0.0
-        
         for r in project.rooms:
             name = val(r, 'name', '-')
-            perim = get_perim(r)
-            h = float(val(r, 'wall_height', 0.0) or 3.0)
-            area = float(val(r, 'area', 0.0) or 0.0)
+            d = rooms_map.get(name)
+            if not d: continue
             
-            # Wall Row - Use actual walls if available
-            walls = val(r, 'walls', []) or []
-            wall_heights_list = []
-            if walls:
-                walls_gross = 0.0
-                walls_total_len = 0.0
-                for w in walls:
-                    w_len = float(val(w, 'length', 0.0) or 0.0)
-                    w_h = float(val(w, 'height', h) or h)
-                    if w_len > 0 and w_h > 0:
-                        walls_gross += w_len * w_h
-                        walls_total_len += w_len
-                        wall_heights_list.append(f"{w_h:.2f}")
-            else:
-                walls_gross = perim * h
-                walls_total_len = perim
-            
-            op_area = 0.0
-            op_ids = val(r, 'opening_ids', []) or []
-            for oid in op_ids:
-                o = openings_map.get(oid)
-                if o:
-                    ow = get_opening_width(o)
-                    oh = get_opening_height(o)
-                    # Use room-specific quantity
-                    room_qtys = val(o, 'room_quantities', {}) or {}
-                    qty = int(room_qtys.get(name, 1))
-                    op_area += (ow * oh * qty)
-            
-            # Use calculated ceramic values from ceramic_by_room (same as summary/paint)
-            room_ceramic = ceramic_by_room.get(name, {'wall': 0.0, 'ceiling': 0.0, 'floor': 0.0})
-            c_wall = room_ceramic['wall']
-            
-            # Plaster is applied BEFORE ceramic - only deduct openings
-            walls_net_plaster = max(0, walls_gross - op_area)
-            
-            # Build note with wall heights and ceramic info
-            note_wall = ""
-            if wall_heights_list and len(set(wall_heights_list)) > 1:
-                note_wall = f"ارتفاعات: {' | '.join(wall_heights_list)}"
-            if c_wall > 0:
-                if note_wall:
-                    note_wall += f" | سيراميك ({c_wall:.2f} م²)"
-                else:
-                    note_wall = f"يوجد سيراميك ({c_wall:.2f} م²) فوق الزريقة"
-            
-            total_gross_plaster += walls_gross
-            total_op_deduct += op_area
-            total_cer_deduct += c_wall  # Track ceramic but don't deduct from plaster
-            total_net_plaster += walls_net_plaster
-
-            mixed_heights = bool(walls and wall_heights_list and len(set(wall_heights_list)) > 1)
-            wall_len_cell = float(walls_total_len or 0.0) if walls_total_len else 0.0
-            wall_h_cell = "" if mixed_heights else (float(wall_heights_list[0]) if (walls and wall_heights_list) else float(h))
-            write_row(ws_plaster, r_idx, [seq, name, "جدران", wall_len_cell, wall_h_cell, walls_gross, op_area, c_wall, walls_net_plaster, note_wall])
+            # Wall Row (Get exact values from calculator)
+            # Net Plaster = d.plaster_walls
+            # Gross = d.walls_gross
+            # Deduct = Gross - Net
+            w_deduct = d.walls_gross - d.plaster_walls
+            write_row(ws, r_idx, [r_idx-1, name, "جدران", d.walls_gross, w_deduct, d.plaster_walls])
             r_idx += 1
-            seq += 1
-
-            # Detail rows when mixed heights: show each wall gross area
-            if walls and len(set(wall_heights_list)) > 1:
-                for w_idx, w in enumerate(walls, 1):
-                    w_len = float(val(w, 'length', 0.0) or 0.0)
-                    w_h = float(val(w, 'height', h) or h)
-                    if w_len <= 0 or w_h <= 0:
-                        continue
-                    w_area = w_len * w_h
-                    write_row(ws_plaster, r_idx, ["", f"{name} - جدار {w_idx}", "تفصيل", w_len, w_h, w_area, "", "", "", ""]) 
-                    r_idx += 1
             
             # Ceiling Row
-            c_ceil = room_ceramic['ceiling']
-            # Plaster is applied BEFORE ceramic on ceiling too
-            ceil_net = area
-            
-            note_ceil = ""
-            if c_ceil > 0:
-                note_ceil = f"يوجد سيراميك ({c_ceil:.2f} م²) فوق الزريقة"
-            
-            total_gross_plaster += area
-            total_cer_deduct += c_ceil  # Track but don't deduct
-            total_net_plaster += ceil_net
-                
-            write_row(ws_plaster, r_idx, [seq, name, "سقف", "", "", area, 0.0, c_ceil, ceil_net, note_ceil])
+            c_deduct = d.ceiling_area - d.plaster_ceiling
+            write_row(ws, r_idx, [r_idx-1, name, "سقف", d.ceiling_area, c_deduct, d.plaster_ceiling])
             r_idx += 1
-            seq += 1
-        
-        # Totals row
-        ws_plaster.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_plaster.cell(row=r_idx, column=6, value=total_gross_plaster).font = FONT_BOLD
-        ws_plaster.cell(row=r_idx, column=6).number_format = '0.00'
-        ws_plaster.cell(row=r_idx, column=7, value=total_op_deduct).font = FONT_BOLD
-        ws_plaster.cell(row=r_idx, column=7).number_format = '0.00'
-        ws_plaster.cell(row=r_idx, column=8, value=total_cer_deduct).font = FONT_BOLD
-        ws_plaster.cell(row=r_idx, column=8).number_format = '0.00'
-        ws_plaster.cell(row=r_idx, column=9, value=total_net_plaster).font = FONT_BOLD
-        ws_plaster.cell(row=r_idx, column=9).number_format = '0.00'
-        for col in range(1, 11):
-            ws_plaster.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_plaster.cell(row=r_idx, column=col).border = BORDER_THIN
-            
-        auto_fit(ws_plaster)
 
-    # 4. CERAMIC (السيراميك)
-    if should_gen('ceramic'):
-        ws_cer = wb.create_sheet("السيراميك")
-        setup_sheet(ws_cer, "السيراميك")
-        headers_cer = ["م", "المنطقة / الغرفة", "النوع", "المحيط (م)", "الارتفاع (م)", "المساحة القائمة (م²)", "خصم الفتحات (م²)", "المساحة الصافية (م²)", "اللاصق (كغ)", "روبة (كغ)"]
-        write_header(ws_cer, headers_cer)
+        auto_fit(ws)
+
+        # Detailed per-wall plaster book (standalone)
+        ws2 = wb.create_sheet("أعمال الزريقة (مفصل)")
+        setup_sheet(ws2, "أعمال الزريقة (مفصل)")
+        write_header(ws2, [
+            "م", "الغرفة", "الجدار/السقف", "الطول (م)", "الارتفاع (م)",
+            "قائم (م²)", "خصم فتحات (م²)", "خصم سيراميك (م²)", "صافي الزريقة (م²)", "ملاحظات"
+        ])
+        row = 2
+        seq = 1
+        for r in getattr(project, 'rooms', []) or []:
+            rname = str(val(r, 'name', '') or '').strip()
+            walls = iter_room_walls(r)
+            if not walls:
+                continue
+            d = rooms_map.get(rname)
+            ssot_open = fnum(getattr(d, 'walls_openings', 0.0) or 0.0) if d else 0.0
+            ssot_plaster = fnum(getattr(d, 'plaster_walls', 0.0) or 0.0) if d else 0.0
+            ssot_cer = fnum(getattr(d, 'ceramic_wall', 0.0) or 0.0) if d else 0.0
+            plaster_under = bool(getattr(project, 'plaster_under_ceramic', True))
+
+            openings = room_openings_map.get(rname, [])
+            hosted = [o for o in openings if val(o, 'host_wall', None)]
+            lengths = [wall_length(w) for w in walls]
+            heights = [wall_height(w, r) for w in walls]
+            names = [wall_name(w, i) for i, w in enumerate(walls)]
+            gross_list = [max(0.0, lengths[i] * heights[i]) for i in range(len(walls))]
+
+            # Hosted opening demand per wall
+            hosted_dem = [0.0 for _ in walls]
+            for o in hosted:
+                host = norm_text(val(o, 'host_wall', ''))
+                if not host:
+                    continue
+                for iwn, wn in enumerate(names):
+                    if host == norm_text(wn):
+                        hosted_dem[iwn] += opening_area_for_room(o, rname)
+                        break
+
+            total_hosted = sum(hosted_dem)
+            if ssot_open <= 0 and total_hosted > 0:
+                ssot_open = total_hosted
+            scale = 1.0
+            notes_open = ''
+            if total_hosted > 0 and ssot_open > 0 and total_hosted > ssot_open:
+                scale = ssot_open / total_hosted
+                notes_open = 'تم تحجيم فتحات مستضافة لتطابق SSOT'
+            hosted_alloc = [min(gross_list[i], hosted_dem[i] * scale) for i in range(len(walls))]
+            rem_caps = [max(0.0, gross_list[i] - hosted_alloc[i]) for i in range(len(walls))]
+            rem_open = max(0.0, ssot_open - sum(hosted_alloc))
+            dist_open, unalloc_open = allocate_capped(rem_open, lengths, rem_caps)
+            open_alloc = [hosted_alloc[i] + dist_open[i] for i in range(len(walls))]
+            if unalloc_open > 0.01:
+                notes_open = (notes_open + '؛ ' if notes_open else '') + 'فتحـات أكبر من طاقة الجدران'
+            net_after_open = [max(0.0, gross_list[i] - open_alloc[i]) for i in range(len(walls))]
+
+            # Ceramic allocation per wall for optional plaster deduction
+            zones = getattr(project, 'ceramic_zones', []) or []
+            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(rname)]
+            wall_z = [z for z in room_z if norm_text(val(z, 'surface_type', 'wall')) == 'wall']
+            z_hosted = [z for z in wall_z if val(z, 'wall_name', None)]
+            hosted_cer = [0.0 for _ in walls]
+            for z in z_hosted:
+                wname = norm_text(val(z, 'wall_name', ''))
+                if not wname:
+                    continue
+                for iwn, wn in enumerate(names):
+                    if wname == norm_text(wn):
+                        hosted_cer[iwn] += fnum(safe_zone_area(z))
+                        break
+            target_cer = min(ssot_cer, sum(net_after_open)) if ssot_cer > 0 else 0.0
+            sum_hosted_cer = sum(hosted_cer)
+            cer_alloc = [0.0 for _ in walls]
+            notes_cer = ''
+            if sum_hosted_cer > 0 and target_cer > 0 and sum_hosted_cer > target_cer:
+                s = target_cer / sum_hosted_cer
+                cer_alloc = [min(net_after_open[i], hosted_cer[i] * s) for i in range(len(walls))]
+                notes_cer = 'تم تحجيم سيراميك مستضاف لتطابق SSOT'
+            else:
+                cer_alloc = [min(net_after_open[i], hosted_cer[i]) for i in range(len(walls))]
+                remaining = max(0.0, target_cer - sum(cer_alloc))
+                caps = [max(0.0, net_after_open[i] - cer_alloc[i]) for i in range(len(walls))]
+                dist_cer, _ = allocate_capped(remaining, lengths, caps)
+                cer_alloc = [cer_alloc[i] + dist_cer[i] for i in range(len(walls))]
+
+            # Plaster allocation (depends on project setting)
+            plaster_caps = net_after_open if plaster_under else [max(0.0, net_after_open[i] - cer_alloc[i]) for i in range(len(walls))]
+            target_plaster = min(ssot_plaster, sum(plaster_caps)) if ssot_plaster > 0 else 0.0
+            plaster_alloc, _ = allocate_capped(target_plaster, plaster_caps, plaster_caps)
+
+            for iwn, wn in enumerate(names):
+                wl = lengths[iwn]
+                whh = heights[iwn]
+                gross = gross_list[iwn]
+                note = ''
+                if notes_open:
+                    note = notes_open
+                if notes_cer and not plaster_under:
+                    note = (note + '؛ ' if note else '') + notes_cer
+                if isinstance(walls[iwn], dict) and walls[iwn].get('_pseudo'):
+                    note = (note + '؛ ' if note else '') + 'لا يوجد تقسيم جدران؛ تم استخدام المحيط'
+                cer_deduct = 0.0 if plaster_under else cer_alloc[iwn]
+                write_row(ws2, row, [
+                    seq, rname, wn, wl, whh,
+                    gross, open_alloc[iwn], cer_deduct, plaster_alloc[iwn], note
+                ])
+                row += 1
+                seq += 1
+
+            # Ceiling row from SSOT
+            if d and fnum(d.plaster_ceiling) > 0:
+                write_row(ws2, row, [seq, rname, 'سقف', '-', '-', fnum(d.plaster_ceiling), 0.0, 0.0, fnum(d.plaster_ceiling), ''])
+                row += 1
+                seq += 1
+        auto_fit(ws2)
+
+    # --- SHEET: PAINT ---
+    if ensure_sheet('paint'):
+        ws = wb.create_sheet("الدهان")
+        setup_sheet(ws, "الدهان")
+        write_header(ws, ["م", "الغرفة", "دهان جدران", "دهان سقف", "الإجمالي"])
         
-        r_idx = 2
-        total_cer_area = 0.0
-        total_deduct = 0.0
-        total_net_area = 0.0
-        total_adhesive = 0.0
-        total_grout = 0.0
-        
-        # CRITICAL: Filter out orphan ceramic zones (walls that no longer exist)
-        valid_ceramic_zones = filter_orphan_ceramic_zones(project.ceramic_zones)
-        
-        for i, z in enumerate(valid_ceramic_zones, 1):
-            zname = val(z, 'name', '-')
+        for i, r in enumerate(project.rooms, 2):
+            name = val(r, 'name', '-')
+            d = rooms_map.get(name)
+            if d:
+                write_row(ws, i, [i-1, name, d.paint_walls, d.paint_ceiling, d.paint_total])
+
+        auto_fit(ws)
+
+        # Detailed per-wall paint book (standalone)
+        ws2 = wb.create_sheet("الدهان (مفصل)")
+        setup_sheet(ws2, "الدهان (مفصل)")
+        write_header(ws2, [
+            "م", "الغرفة", "الجدار/السقف", "الطول (م)", "الارتفاع (م)",
+            "صافي بعد الفتحات (م²)", "سيراميك (م²)", "صافي الدهان (م²)", "ملاحظات"
+        ])
+        row = 2
+        seq = 1
+        zones = getattr(project, 'ceramic_zones', []) or []
+
+        for r in getattr(project, 'rooms', []) or []:
+            rname = str(val(r, 'name', '') or '').strip()
+            walls = iter_room_walls(r)
+            if not walls:
+                continue
+            d = rooms_map.get(rname)
+            ssot_open = fnum(getattr(d, 'walls_openings', 0.0) or 0.0) if d else 0.0
+            ssot_cer = fnum(getattr(d, 'ceramic_wall', 0.0) or 0.0) if d else 0.0
+            ssot_paint = fnum(getattr(d, 'paint_walls', 0.0) or 0.0) if d else 0.0
+
+            openings = room_openings_map.get(rname, [])
+            hosted = [o for o in openings if val(o, 'host_wall', None)]
+
+            lengths = [wall_length(w) for w in walls]
+            heights = [wall_height(w, r) for w in walls]
+            names = [wall_name(w, i) for i, w in enumerate(walls)]
+            gross_list = [max(0.0, lengths[i] * heights[i]) for i in range(len(walls))]
+
+            hosted_dem = [0.0 for _ in walls]
+            for o in hosted:
+                host = norm_text(val(o, 'host_wall', ''))
+                if not host:
+                    continue
+                for iwn, wn in enumerate(names):
+                    if host == norm_text(wn):
+                        hosted_dem[iwn] += opening_area_for_room(o, rname)
+                        break
+            total_hosted = sum(hosted_dem)
+            if ssot_open <= 0 and total_hosted > 0:
+                ssot_open = total_hosted
+            scale = 1.0
+            notes_open = ''
+            if total_hosted > 0 and ssot_open > 0 and total_hosted > ssot_open:
+                scale = ssot_open / total_hosted
+                notes_open = 'تم تحجيم فتحات مستضافة لتطابق SSOT'
+            hosted_alloc = [min(gross_list[i], hosted_dem[i] * scale) for i in range(len(walls))]
+            rem_caps = [max(0.0, gross_list[i] - hosted_alloc[i]) for i in range(len(walls))]
+            rem_open = max(0.0, ssot_open - sum(hosted_alloc))
+            dist_open, unalloc_open = allocate_capped(rem_open, lengths, rem_caps)
+            open_alloc = [hosted_alloc[i] + dist_open[i] for i in range(len(walls))]
+            if unalloc_open > 0.01:
+                notes_open = (notes_open + '؛ ' if notes_open else '') + 'فتحـات أكبر من طاقة الجدران'
+            net_after_open = [max(0.0, gross_list[i] - open_alloc[i]) for i in range(len(walls))]
+
+            # Ceramic allocation matched to SSOT
+            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(rname)]
+            wall_z = [z for z in room_z if norm_text(val(z, 'surface_type', 'wall')) == 'wall']
+            z_hosted = [z for z in wall_z if val(z, 'wall_name', None)]
+            hosted_cer = [0.0 for _ in walls]
+            for z in z_hosted:
+                wname = norm_text(val(z, 'wall_name', ''))
+                if not wname:
+                    continue
+                for iwn, wn in enumerate(names):
+                    if wname == norm_text(wn):
+                        hosted_cer[iwn] += fnum(safe_zone_area(z))
+                        break
+            target_cer = min(ssot_cer, sum(net_after_open)) if ssot_cer > 0 else 0.0
+            sum_hosted_cer = sum(hosted_cer)
+            cer_alloc = [0.0 for _ in walls]
+            notes_cer = ''
+            if sum_hosted_cer > 0 and target_cer > 0 and sum_hosted_cer > target_cer:
+                s = target_cer / sum_hosted_cer
+                cer_alloc = [min(net_after_open[i], hosted_cer[i] * s) for i in range(len(walls))]
+                notes_cer = 'تم تحجيم سيراميك مستضاف لتطابق SSOT'
+            else:
+                cer_alloc = [min(net_after_open[i], hosted_cer[i]) for i in range(len(walls))]
+                remaining = max(0.0, target_cer - sum(cer_alloc))
+                caps = [max(0.0, net_after_open[i] - cer_alloc[i]) for i in range(len(walls))]
+                dist_cer, _ = allocate_capped(remaining, lengths, caps)
+                cer_alloc = [cer_alloc[i] + dist_cer[i] for i in range(len(walls))]
+
+            # Paint allocation matched to SSOT
+            paint_caps = [max(0.0, net_after_open[i] - cer_alloc[i]) for i in range(len(walls))]
+            target_paint = min(ssot_paint, sum(paint_caps)) if ssot_paint > 0 else 0.0
+            paint_alloc, _ = allocate_capped(target_paint, paint_caps, paint_caps)
+
+            for iwn, wn in enumerate(names):
+                wl = lengths[iwn]
+                whh = heights[iwn]
+                notes = notes_open
+                if notes_cer:
+                    notes = (notes + '؛ ' if notes else '') + notes_cer
+                if isinstance(walls[iwn], dict) and walls[iwn].get('_pseudo'):
+                    notes = (notes + '؛ ' if notes else '') + 'لا يوجد تقسيم جدران؛ تم استخدام المحيط'
+                write_row(ws2, row, [seq, rname, wn, wl, whh, net_after_open[iwn], cer_alloc[iwn], paint_alloc[iwn], notes])
+                row += 1
+                seq += 1
+
+            if d and (fnum(d.paint_ceiling) > 0 or fnum(d.ceramic_ceiling) > 0):
+                base = fnum(d.paint_ceiling) + min(fnum(d.paint_ceiling), fnum(d.ceramic_ceiling))
+                write_row(ws2, row, [seq, rname, 'سقف', '-', '-', base, fnum(d.ceramic_ceiling), fnum(d.paint_ceiling), ''])
+                row += 1
+                seq += 1
+        auto_fit(ws2)
+
+    # --- SHEET: CERAMIC ---
+    if ensure_sheet('ceramic'):
+        ws = wb.create_sheet("السيراميك")
+        setup_sheet(ws, "السيراميك")
+
+        # Per-room SSOT totals
+        write_header(ws, ["م", "الغرفة", "سيراميك جدران", "سيراميك أرضيات", "سيراميك سقف", "الإجمالي"])
+        row = 2
+        for i, r in enumerate(project.rooms, 2):
+            name = val(r, 'name', '-')
+            d = rooms_map.get(name)
+            if d:
+                write_row(ws, row, [row-1, name, d.ceramic_wall, d.ceramic_floor, d.ceramic_ceiling, d.ceramic_wall + d.ceramic_floor + d.ceramic_ceiling])
+            else:
+                write_row(ws, row, [row-1, name, 0, 0, 0, 0])
+            row += 1
+
+        # Zones details table
+        row += 2
+        ws.cell(row=row, column=2, value="تفاصيل مناطق السيراميك (Zones)").font = FONT_BOLD
+        row += 1
+        write_header(ws, [
+            "م", "اسم المنطقة", "الغرفة", "الجدار", "النوع", "المحيط (م)", "الارتفاع (م)", "بداية (م)",
+            "المساحة (م²)", "Effective Area", "لاصق (كغ)", "جراوت (كغ)"
+        ])
+        row += 1
+        zones = getattr(project, 'ceramic_zones', []) or []
+        for idx, z in enumerate(zones, 1):
+            z_name = val(z, 'name', '')
+            z_room = val(z, 'room_name', '')
+            z_wall = val(z, 'wall_name', '')
             stype = val(z, 'surface_type', 'wall')
-            stype_ar = "جدران" if stype == 'wall' else "أرضية"
-            perim = float(val(z, 'perimeter', 0.0) or 0.0)
-            h = float(val(z, 'height', 0.0) or 0.0)
-            
-            # Calculate Gross Area
-            gross_area = perim * h
-            
-            # Calculate Deductions (Openings)
-            deduction = 0.0
-            z_room_name = val(z, 'room_name', '')
-            
-            # Only calculate deductions for walls, and if we have room info
-            if stype == 'wall' and z_room_name:
-                # Find room object
-                room_obj = next((r for r in project.rooms if val(r, 'name', '') == z_room_name), None)
-                if room_obj:
-                    z_start = float(val(z, 'start_height', 0.0) or 0.0)
-                    z_end = z_start + h
-                    
-                    op_ids = val(room_obj, 'opening_ids', []) or []
-                    for oid in op_ids:
-                        o = openings_map.get(oid)
-                        if not o: continue
-                        
-                        # Get opening geometry
-                        ow = get_opening_width(o)
-                        oh = get_opening_height(o)
-                        
-                        # Get placement (sill height)
-                        # Default: Window=1.0m, Door=0.0m
-                        otype = str(val(o, 'opening_type', '')).upper()
-                        def_place = 1.0 if otype == 'WINDOW' else 0.0
-                        place = float(val(o, 'placement_height', def_place) or def_place)
-                        
-                        o_bottom = place
-                        o_top = place + oh
-                        
-                        # Calculate vertical overlap
-                        overlap_start = max(z_start, o_bottom)
-                        overlap_end = min(z_end, o_top)
-                        overlap_h = max(0.0, overlap_end - overlap_start)
-                        
-                        if overlap_h > 0:
-                            # Get quantity in this room
-                            room_qtys = val(o, 'room_quantities', {}) or {}
-                            qty = int(room_qtys.get(z_room_name, 1))
-                            
-                            # Deduction = Width * Overlap * Qty
-                            # Note: This assumes the opening is fully within the ceramic zone horizontally
-                            # Since we don't have horizontal placement, we assume full width deduction
-                            # proportional to the wall length? No, usually full width is deducted.
-                            # However, if the zone is only part of the room (e.g. one wall), 
-                            # we should only deduct if the opening is on THAT wall.
-                            # Current data model links zones to walls via 'wall_name' if available.
-                            
-                            z_wall_name = val(z, 'wall_name', '')
-                            should_deduct = True
-                            
-                            # If zone is linked to a specific wall, check if opening is on that wall
-                            # Opening 'assigned_walls' or similar?
-                            # Currently openings are linked to rooms, not specific walls in the simple model.
-                            # BUT, if we have 'wall_name' in zone, we can try to be smarter.
-                            # If we don't know which wall the opening is on, we might over-deduct if we deduct from all zones.
-                            # HEURISTIC: If zone covers the whole room (perimeter ~ room perimeter), deduct all.
-                            # If zone is partial, we might be over-deducting.
-                            # For now, we will deduct proportionally if zone perimeter < room perimeter?
-                            # Or just deduct full width and let the user verify.
-                            # BETTER: Use the logic from room_metrics which handles this via 'shares' or similar.
-                            # But here we are in a simple export script.
-                            
-                            # Let's check if we can match wall names.
-                            # Openings don't usually store 'wall_name' in the simple model.
-                            # So we will assume if the zone is a "Wall Zone", it might intersect.
-                            # To be safe, we can check if zone perimeter is close to room perimeter.
-                            room_perim = get_perim(room_obj)
-                            if room_perim > 0 and perim < room_perim * 0.9:
-                                # Partial zone (e.g. one wall).
-                                # We don't know if the door is on this wall.
-                                # Distribute deduction proportionally to perimeter?
-                                # Deduction = (Opening Area Overlap) * (Zone Perim / Room Perim)
-                                ratio = perim / room_perim
-                                deduction += (ow * overlap_h * qty) * ratio
-                            else:
-                                # Full room zone, deduct full opening
-                                deduction += (ow * overlap_h * qty)
-            
-            # CRITICAL FIX: Use safe_zone_area to calculate area (avoids stale stored values)
-            from ..calculations.helpers import safe_zone_area
-            
-            safe_area = safe_zone_area(z)
-            
-            # Determine if safe_area is a "Net" area (from effective_area) or "Gross" area
-            # We check if it differs significantly from gross_area
-            if abs(safe_area - gross_area) > 0.001:
-                # It's different from gross, so it must be a valid effective area (Net Area)
-                net_area = safe_area
-                # Force deduction to match the math: Deduction = Gross - Net
-                # This ensures the table is mathematically consistent even if our calculated deduction was off
-                if gross_area > net_area:
-                    deduction = gross_area - net_area
-                else:
-                    # If Net >= Gross (e.g. waste factor added manually?), show 0 deduction
-                    deduction = 0.0
+            perim = fnum(val(z, 'perimeter', 0.0))
+            h = fnum(val(z, 'height', 0.0))
+            start_h = fnum(val(z, 'start_height', 0.0))
+            eff_area = fnum(val(z, 'effective_area', 0.0))
+            area = fnum(safe_zone_area(z))
+            adh = fnum(val(z, 'adhesive_kg', 0.0))
+            grout = fnum(val(z, 'grout_kg', 0.0))
+            write_row(ws, row, [idx, z_name, z_room, z_wall, stype, perim, h, start_h, area, eff_area, adh, grout])
+            row += 1
+
+        auto_fit(ws)
+
+        # Detailed per-wall ceramic book (standalone)
+        ws2 = wb.create_sheet("السيراميك (مفصل)")
+        setup_sheet(ws2, "السيراميك (مفصل)")
+        write_header(ws2, [
+            "م", "نوع السطر", "الغرفة", "الجدار/الأرضية/السقف", "الطول (م)", "الارتفاع (م)", "السيراميك (م²)", "ملاحظات"
+        ])
+        row2 = 2
+        seq2 = 1
+        zones = getattr(project, 'ceramic_zones', []) or []
+        for r in getattr(project, 'rooms', []) or []:
+            rname = str(val(r, 'name', '') or '').strip()
+            walls = iter_room_walls(r)
+            if not walls:
+                continue
+            d = rooms_map.get(rname)
+            ssot_wall = fnum(getattr(d, 'ceramic_wall', 0.0) or 0.0) if d else 0.0
+            ssot_floor = fnum(getattr(d, 'ceramic_floor', 0.0) or 0.0) if d else 0.0
+            ssot_ceil = fnum(getattr(d, 'ceramic_ceiling', 0.0) or 0.0) if d else 0.0
+
+            lengths = [wall_length(w) for w in walls]
+            heights = [wall_height(w, r) for w in walls]
+            names = [wall_name(w, i) for i, w in enumerate(walls)]
+            gross_list = [max(0.0, lengths[i] * heights[i]) for i in range(len(walls))]
+            # Ceramic should never exceed wall gross; use gross as capacity here.
+            caps_wall = gross_list
+
+            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(rname)]
+            wall_z = [z for z in room_z if norm_text(val(z, 'surface_type', 'wall')) == 'wall']
+            floor_z = [z for z in room_z if norm_text(val(z, 'surface_type', '')) == 'floor']
+            ceil_z = [z for z in room_z if norm_text(val(z, 'surface_type', '')) == 'ceiling']
+            z_hosted = [z for z in wall_z if val(z, 'wall_name', None)]
+
+            hosted_cer = [0.0 for _ in walls]
+            for z in z_hosted:
+                wname = norm_text(val(z, 'wall_name', ''))
+                if not wname:
+                    continue
+                for iwn, wn in enumerate(names):
+                    if wname == norm_text(wn):
+                        hosted_cer[iwn] += fnum(safe_zone_area(z))
+                        break
+
+            target = min(ssot_wall, sum(caps_wall)) if ssot_wall > 0 else 0.0
+            sum_hosted = sum(hosted_cer)
+            notes_common = ''
+            cer_alloc = [0.0 for _ in walls]
+            if sum_hosted > 0 and target > 0 and sum_hosted > target:
+                s = target / sum_hosted
+                cer_alloc = [min(caps_wall[i], hosted_cer[i] * s) for i in range(len(walls))]
+                notes_common = 'تم تحجيم سيراميك مستضاف لتطابق SSOT'
             else:
-                # It equals gross area (so no effective area, or effective was rejected)
-                # We use our calculated deduction from overlap logic
-                net_area = max(0.0, gross_area - deduction)
-                # deduction variable is already calculated above
-            
-            # Recalculate materials based on Net Area
-            adh = net_area * (5.0 if stype == 'floor' else 3.0)
-            grout = net_area * 0.5
-            
-            total_cer_area += gross_area
-            total_deduct += deduction
-            total_net_area += net_area
-            total_adhesive += adh
-            total_grout += grout
-            
-            write_row(ws_cer, r_idx, [i, zname, stype_ar, perim, h, gross_area, deduction, net_area, adh, grout])
-            r_idx += 1
-        
-        # Totals row
-        ws_cer.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=6, value=total_cer_area).font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=6).number_format = '0.00'
-        ws_cer.cell(row=r_idx, column=7, value=total_deduct).font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=7).number_format = '0.00'
-        ws_cer.cell(row=r_idx, column=8, value=total_net_area).font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=8).number_format = '0.00'
-        ws_cer.cell(row=r_idx, column=9, value=total_adhesive).font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=9).number_format = '0.00'
-        ws_cer.cell(row=r_idx, column=10, value=total_grout).font = FONT_BOLD
-        ws_cer.cell(row=r_idx, column=10).number_format = '0.00'
-        for col in range(1, 11):
-            ws_cer.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_cer.cell(row=r_idx, column=col).border = BORDER_THIN
-        auto_fit(ws_cer)
+                cer_alloc = [min(caps_wall[i], hosted_cer[i]) for i in range(len(walls))]
+                remaining = max(0.0, target - sum(cer_alloc))
+                caps = [max(0.0, caps_wall[i] - cer_alloc[i]) for i in range(len(walls))]
+                dist, _ = allocate_capped(remaining, lengths, caps)
+                cer_alloc = [cer_alloc[i] + dist[i] for i in range(len(walls))]
 
-    # 5. PAINT (الدهان)
-    if should_gen('paint'):
-        ws_paint = wb.create_sheet("الدهان")
-        setup_sheet(ws_paint, "الدهان")
-        headers_paint = [
-            "م", "الغرفة", "نوع الغرفة", "الطول (م)", "الارتفاع (م)", "مساحة الجدران القائمة (م²)",
-            "خصم الفتحات (م²)", "خصم السيراميك (م²)", "دهان جدران صافي (م²)", "دهان سقف (م²)", "الإجمالي (م²)"
-        ]
-        write_header(ws_paint, headers_paint)
-        
-        r_idx = 2
-        total_paint_wall = 0.0
-        total_paint_ceil = 0.0
-        
-        for i, r in enumerate(project.rooms, 1):
-            name = val(r, 'name', '-')
-            room_type = val(r, 'room_type', '[غير محدد]') or '[غير محدد]'
-            perim = get_perim(r)
-            h = float(val(r, 'wall_height', 0.0) or 3.0)
-            area = float(val(r, 'area', 0.0) or 0.0)
+            for iwn, wn in enumerate(names):
+                notes = notes_common
+                if isinstance(walls[iwn], dict) and walls[iwn].get('_pseudo'):
+                    notes = (notes + '؛ ' if notes else '') + 'لا يوجد تقسيم جدران؛ تم استخدام المحيط'
+                write_row(ws2, row2, [seq2, 'جدار', rname, wn, lengths[iwn], heights[iwn], cer_alloc[iwn], notes])
+                row2 += 1
+                seq2 += 1
 
-            walls = val(r, 'walls', []) or []
-            walls_gross = 0.0
-            walls_total_len = 0.0
-            if walls:
-                for wl in walls:
-                    w_len = float(val(wl, 'length', 0.0) or 0.0)
-                    w_h = float(val(wl, 'height', h) or h)
-                    if w_len > 0 and w_h > 0:
-                        walls_gross += w_len * w_h
-                        walls_total_len += w_len
-            else:
-                walls_gross = perim * h
-                walls_total_len = perim
+            if ssot_floor > 0:
+                write_row(ws2, row2, [seq2, 'أرضية', rname, 'أرضية', '-', '-', ssot_floor, 'SSOT'])
+                row2 += 1
+                seq2 += 1
 
-            # Net Walls
-            op_area = 0.0
-            op_ids = val(r, 'opening_ids', []) or []
-            for oid in op_ids:
-                o = openings_map.get(oid)
-                if o:
-                    ow = get_opening_width(o)
-                    oh = get_opening_height(o)
-                    # Use room-specific quantity
-                    room_qtys = val(o, 'room_quantities', {}) or {}
-                    qty = int(room_qtys.get(name, 1))
-                    op_area += (ow * oh * qty)
-            
-            # Use calculated ceramic values from ceramic_by_room (same as summary)
-            room_ceramic = ceramic_by_room.get(name, {'wall': 0.0, 'ceiling': 0.0, 'floor': 0.0})
-            c_wall = room_ceramic['wall']
-            c_ceil = room_ceramic['ceiling']
-            
-            paint_wall = max(0, walls_gross - op_area - c_wall)
-            paint_ceil = max(0, area - c_ceil)
-            total = paint_wall + paint_ceil
-            
-            total_paint_wall += paint_wall
-            total_paint_ceil += paint_ceil
-            
-            mixed_heights = bool(walls and len(set([f"{float(val(wl, 'height', h) or h):.2f}" for wl in walls])) > 1)
-            wall_len_cell = float(walls_total_len or 0.0) if walls_total_len else 0.0
-            wall_h_cell = "" if mixed_heights else float(h)
-            write_row(ws_paint, r_idx, [
-                i, name, room_type,
-                wall_len_cell, wall_h_cell, walls_gross,
-                op_area, c_wall,
-                paint_wall, paint_ceil, total
+            if ssot_ceil > 0:
+                write_row(ws2, row2, [seq2, 'سقف', rname, 'سقف', '-', '-', ssot_ceil, 'SSOT'])
+                row2 += 1
+                seq2 += 1
+
+        auto_fit(ws2)
+
+    # --- SHEET: OPENINGS (Doors + Windows) ---
+    if ensure_sheet('openings'):
+        ws = wb.create_sheet("الفتحات")
+        setup_sheet(ws, "الفتحات")
+        write_header(ws, [
+            "م", "النوع", "الاسم", "المادة", "العرض", "الارتفاع", "العدد",
+            "المساحة/قطعة", "المساحة الإجمالية", "منسوب (م)", "الجدار", "الغرف المرتبطة", "كميات الغرف"
+        ])
+
+        row = 2
+        for o in (getattr(project, 'doors', []) or []) + (getattr(project, 'windows', []) or []):
+            otype = str(val(o, 'opening_type', '') or '').upper() or ('DOOR' if o in (getattr(project, 'doors', []) or []) else 'WINDOW')
+            name = val(o, 'name', '')
+            mat = val(o, 'material_type', None) or val(o, 'type', '')
+            w = fnum(val(o, 'width', None) or val(o, 'w', 0.0))
+            h = fnum(val(o, 'height', None) or val(o, 'h', 0.0))
+            qty = int(val(o, 'quantity', None) or val(o, 'qty', 1) or 1)
+            place = fnum(val(o, 'placement_height', 0.0))
+            host = val(o, 'host_wall', '')
+            assigned = val(o, 'assigned_rooms', None)
+            if assigned is None:
+                assigned = list((val(o, 'room_quantities', {}) or {}).keys())
+            qmap = val(o, 'room_quantities', {}) or {}
+            write_row(ws, row, [
+                row-1, otype, name, mat, w, h, qty,
+                (w * h) if (w > 0 and h > 0) else 0.0,
+                get_opening_area(o), place, host,
+                ", ".join(assigned) if isinstance(assigned, list) else str(assigned or ''),
+                str(qmap)
             ])
-            r_idx += 1
+            row += 1
 
-            # Detail rows when mixed heights: show each wall net paint (with proportional deductions)
-            if mixed_heights:
-                for w_idx, wl in enumerate(walls, 1):
-                    w_len = float(val(wl, 'length', 0.0) or 0.0)
-                    w_h = float(val(wl, 'height', h) or h)
-                    if w_len <= 0 or w_h <= 0:
-                        continue
-                    w_area_gross = w_len * w_h
-                    # Distribute openings and ceramic deductions proportionally by wall area
-                    share_ratio = (w_area_gross / walls_gross) if walls_gross > 0 else 0.0
-                    w_op_deduct = op_area * share_ratio
-                    w_cer_deduct = c_wall * share_ratio
-                    w_paint_net = max(0.0, w_area_gross - w_op_deduct - w_cer_deduct)
-                    write_row(ws_paint, r_idx, [
-                        "", f"{name} - جدار {w_idx}", "تفصيل",
-                        w_len, w_h, w_area_gross,
-                        w_op_deduct, w_cer_deduct, w_paint_net, "", ""
+        auto_fit(ws)
+
+    # --- SHEET: BASEBOARDS ---
+    if ensure_sheet('baseboards'):
+        ws = wb.create_sheet("النعلات")
+        setup_sheet(ws, "النعلات")
+
+        # SSOT per-room
+        write_header(ws, ["م", "الغرفة", "نعلات (م.ط)"])
+        row = 2
+        for i, r in enumerate(project.rooms, 2):
+            name = val(r, 'name', '-')
+            d = rooms_map.get(name)
+            write_row(ws, row, [row-1, name, (d.baseboard_length if d else 0.0)])
+            row += 1
+
+        # Items ledger (if user uses Baseboard model)
+        row += 2
+        ws.cell(row=row, column=2, value="تفاصيل النعلات (عناصر)" ).font = FONT_BOLD
+        row += 1
+        write_header(ws, ["م", "الاسم", "المحيط", "خصم الأبواب", "الصافي (م.ط)", "النوع", "الارتفاع (سم)", "المساحة (م²)", "لاصق (كغ)"])
+        row += 1
+        bbs = getattr(project, 'baseboards', []) or []
+        for idx, b in enumerate(bbs, 1):
+            perim = fnum(val(b, 'perimeter', 0.0))
+            ded = fnum(val(b, 'door_width_deduction', 0.0))
+            net = fnum(val(b, 'net_length_m', None))
+            if net <= 0 and perim > 0:
+                net = max(0.0, perim - ded)
+            mat = val(b, 'material_type', '')
+            hcm = fnum(val(b, 'height_cm', 0.0))
+            area = fnum(val(b, 'area_m2', None))
+            if area <= 0 and net > 0 and hcm > 0:
+                area = net * (hcm / 100.0)
+            adh = fnum(val(b, 'adhesive_kg', None))
+            write_row(ws, row, [idx, val(b, 'name', ''), perim, ded, net, mat, hcm, area, adh])
+            row += 1
+
+        auto_fit(ws)
+
+    # --- SHEET: STONE ---
+    if ensure_sheet('stone'):
+        ws = wb.create_sheet("الحجر")
+        setup_sheet(ws, "الحجر")
+
+        write_header(ws, ["م", "الغرفة", "حجر/أطر (م.ط) - SSOT"])
+        row = 2
+        for r in project.rooms:
+            name = val(r, 'name', '-')
+            d = rooms_map.get(name)
+            write_row(ws, row, [row-1, name, (d.stone_length if d else 0.0)])
+            row += 1
+
+        row += 2
+        ws.cell(row=row, column=2, value="تفاصيل الحجر حسب الفتحات" ).font = FONT_BOLD
+        row += 1
+        write_header(ws, ["م", "النوع", "الاسم", "العرض", "الارتفاع", "العدد", "الحجر (م.ط)"])
+        row += 1
+        idx = 1
+        for o in (getattr(project, 'doors', []) or []) + (getattr(project, 'windows', []) or []):
+            otype = str(val(o, 'opening_type', '') or '').upper() or ('DOOR' if o in (getattr(project, 'doors', []) or []) else 'WINDOW')
+            name = val(o, 'name', '')
+            w = fnum(val(o, 'width', None) or val(o, 'w', 0.0))
+            h = fnum(val(o, 'height', None) or val(o, 'h', 0.0))
+            qty = int(val(o, 'quantity', None) or val(o, 'qty', 1) or 1)
+            write_row(ws, row, [idx, otype, name, w, h, qty, get_opening_stone(o)])
+            row += 1
+            idx += 1
+
+        auto_fit(ws)
+
+    # --- SHEET: WALLS ---
+    if ensure_sheet('walls'):
+        ws = wb.create_sheet("المباني")
+        setup_sheet(ws, "المباني")
+        write_header(ws, [
+            "م", "اسم الجدار", "الغرفة", "الطبقة", "الطول", "الارتفاع",
+            "قائم (م²)", "خصم (م²)", "صافي (م²)", "نوع السطح", "اتجاه", "سيراميك (ارتفاع)", "سيراميك (مساحة)"
+        ])
+
+        row = 2
+        walls = getattr(project, 'walls', []) or []
+        # If global walls list is empty, fall back to per-room walls.
+        if walls:
+            for idx, w in enumerate(walls, 1):
+                write_row(ws, row, [
+                    idx,
+                    val(w, 'name', ''),
+                    val(w, 'room_name', '') or val(w, 'room', ''),
+                    val(w, 'layer', ''),
+                    fnum(val(w, 'length', 0.0)),
+                    fnum(val(w, 'height', 0.0)),
+                    fnum(val(w, 'gross_area', None) or val(w, 'gross', 0.0)),
+                    fnum(val(w, 'deduction_area', None) or val(w, 'deduct', 0.0)),
+                    fnum(val(w, 'net_area', None) or val(w, 'net', 0.0)),
+                    val(w, 'surface_type', ''),
+                    val(w, 'direction', ''),
+                    fnum(val(w, 'ceramic_height', 0.0)),
+                    fnum(val(w, 'ceramic_area', 0.0)),
+                ])
+                row += 1
+        else:
+            idx = 1
+            for r in getattr(project, 'rooms', []) or []:
+                rname = val(r, 'name', '')
+                for w in (val(r, 'walls', []) or []):
+                    length = fnum(val(w, 'length', 0.0))
+                    height = fnum(val(w, 'height', 0.0) or val(r, 'wall_height', 0.0) or 3.0)
+                    gross = fnum(val(w, 'gross_area', None) or val(w, 'gross', None) or (length * height))
+                    deduct = fnum(val(w, 'deduction_area', None) or val(w, 'deduct', 0.0))
+                    net = fnum(val(w, 'net_area', None) or val(w, 'net', None) or max(0.0, gross - deduct))
+                    write_row(ws, row, [
+                        idx,
+                        val(w, 'name', ''),
+                        rname,
+                        val(w, 'layer', ''),
+                        length,
+                        height,
+                        gross,
+                        deduct,
+                        net,
+                        val(w, 'surface_type', ''),
+                        val(w, 'direction', ''),
+                        fnum(val(w, 'ceramic_height', 0.0)),
+                        fnum(val(w, 'ceramic_area', 0.0)),
                     ])
-                    r_idx += 1
-        
-        # Totals row
-        ws_paint.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_paint.cell(row=r_idx, column=9, value=total_paint_wall).font = FONT_BOLD
-        ws_paint.cell(row=r_idx, column=9).number_format = '0.00'
-        ws_paint.cell(row=r_idx, column=10, value=total_paint_ceil).font = FONT_BOLD
-        ws_paint.cell(row=r_idx, column=10).number_format = '0.00'
-        ws_paint.cell(row=r_idx, column=11, value=total_paint_wall + total_paint_ceil).font = FONT_BOLD
-        ws_paint.cell(row=r_idx, column=11).number_format = '0.00'
-        for col in range(1, 12):
-            ws_paint.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_paint.cell(row=r_idx, column=col).border = BORDER_THIN
-        auto_fit(ws_paint)
+                    row += 1
+                    idx += 1
 
-    # 6. BASEBOARDS (النعلات)
-    if should_gen('baseboards'):
-        ws_base = wb.create_sheet("النعلات")
-        setup_sheet(ws_base, "النعلات")
-        headers_base = ["م", "الغرفة", "نوع الغرفة", "المحيط (م)", "خصم الأبواب (م)", "صافي النعلات (م.ط)"]
-        write_header(ws_base, headers_base)
-        
-        r_idx = 2
-        total_perim = 0.0
-        total_door_deduct = 0.0
-        total_net_base = 0.0
-        
-        for i, r in enumerate(project.rooms, 1):
+        auto_fit(ws)
+
+    # --- SHEET: CEILING TILES ---
+    if ensure_sheet('ceiling_tiles'):
+        ws = wb.create_sheet("بلاط الأسقف")
+        setup_sheet(ws, "بلاط الأسقف")
+        # No dedicated ceiling-tiles ledger exists; export ceiling areas as a takeoff baseline.
+        write_header(ws, ["م", "الغرفة", "مساحة السقف (م²)"])
+        row = 2
+        for r in getattr(project, 'rooms', []) or []:
             name = val(r, 'name', '-')
-            room_type = val(r, 'room_type', '[غير محدد]') or '[غير محدد]'
-            perim = get_perim(r)
-            
-            deduct = 0.0
-            op_ids = val(r, 'opening_ids', []) or []
-            for oid in op_ids:
-                o = openings_map.get(oid)
-                if o and str(val(o, 'opening_type', '')).upper() == 'DOOR':
-                    ow = get_opening_width(o)
-                    # Use room-specific quantity if available, else default to 1
-                    room_qtys = val(o, 'room_quantities', {}) or {}
-                    qty = int(room_qtys.get(name, 1))
-                    deduct += (ow * qty)
-            
-            net = max(0, perim - deduct)
-            
-            total_perim += perim
-            total_door_deduct += deduct
-            total_net_base += net
-            
-            write_row(ws_base, r_idx, [i, name, room_type, perim, deduct, net])
-            r_idx += 1
-        
-        # Totals row
-        ws_base.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_base.cell(row=r_idx, column=4, value=total_perim).font = FONT_BOLD
-        ws_base.cell(row=r_idx, column=4).number_format = '0.00'
-        ws_base.cell(row=r_idx, column=5, value=total_door_deduct).font = FONT_BOLD
-        ws_base.cell(row=r_idx, column=5).number_format = '0.00'
-        ws_base.cell(row=r_idx, column=6, value=total_net_base).font = FONT_BOLD
-        ws_base.cell(row=r_idx, column=6).number_format = '0.00'
-        for col in range(1, 7):
-            ws_base.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_base.cell(row=r_idx, column=col).border = BORDER_THIN
-        auto_fit(ws_base)
+            d = rooms_map.get(name)
+            write_row(ws, row, [row-1, name, (d.ceiling_area if d else fnum(val(r, 'area', 0.0)))])
+            row += 1
+        auto_fit(ws)
 
-    # 7. STONE & OPENINGS (الحجر والفتحات)
-    if should_gen('stone'):
-        ws_stone = wb.create_sheet("الحجر والفتحات")
-        setup_sheet(ws_stone, "الحجر والفتحات")
-        headers_stone = [
-            "م", "العنصر", "النوع", "المادة", "العدد", "الأبعاد", 
-            "مساحة الفتحة (م²)", "محيط الحجر (م.ط)", "مساحة الأباجور (م²)", "وزن الحديد (كغ)"
-        ]
-        write_header(ws_stone, headers_stone)
-        
-        r_idx = 2
-        total_op_area = 0.0
-        total_stone = 0.0
-        total_shutter = 0.0
-        total_weight = 0.0
-        
-        filtered_ops = unique_openings(project.doors + project.windows)
+    # --- SHEET: FLOOR TILES ---
+    if ensure_sheet('floor_tiles'):
+        ws = wb.create_sheet("بلاط الأرضيات")
+        setup_sheet(ws, "بلاط الأرضيات")
+        write_header(ws, ["م", "الوصف", "الصافي (م²)", "مع الهدر (م²)"])
 
-        for i, o in enumerate(filtered_ops, 1):
-            name = val(o, 'name', '-')
-            otype = "باب" if str(val(o, 'opening_type', '')).upper() == 'DOOR' else "شباك"
-            material = val(o, 'material_type', '-') or val(o, 'type', '-') or '-'
-            qty = get_opening_qty(o)
-            w = get_opening_width(o)
-            h = get_opening_height(o)
-            dims = f"{w:.2f}x{h:.2f}"
-            
-            area_one = w * h
-            area_total = area_one * qty
-            
-            # Stone Perimeter (Perimeter * Qty)
-            # Doors: 2 sides + top (2h + w)
-            # Windows: 4 sides (2h + 2w)
-            if str(val(o, 'opening_type', '')).upper() == 'DOOR':
-                perim_one = (2 * h) + w
-            else:
-                perim_one = 2 * (w + h)
-                
-            stone_total = perim_one * qty
-            
-            # Shutter (Abajour) - Assume for Windows only
-            shutter_area = area_total if otype == "شباك" else 0.0
-            
-            # Metal Weight
-            # Check material type
-            mat = str(val(o, 'material_type', '')).lower()
-            is_metal = any(x in mat for x in ['metal', 'iron', 'steel', 'حديد', 'معدن'])
-            weight = 0.0
-            if is_metal:
-                weight = float(val(o, 'weight', 0.0) or 0.0)
-                if weight == 0:
-                    weight = area_total * 25.0 
-            
-            total_op_area += area_total
-            total_stone += stone_total
-            total_shutter += shutter_area
-            total_weight += weight
-            
-            write_row(ws_stone, r_idx, [i, name, otype, material, qty, dims, area_total, stone_total, shutter_area, weight])
-            r_idx += 1
-        
-        # Totals row
-        ws_stone.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_stone.cell(row=r_idx, column=7, value=total_op_area).font = FONT_BOLD
-        ws_stone.cell(row=r_idx, column=7).number_format = '0.00'
-        ws_stone.cell(row=r_idx, column=8, value=total_stone).font = FONT_BOLD
-        ws_stone.cell(row=r_idx, column=8).number_format = '0.00'
-        ws_stone.cell(row=r_idx, column=9, value=total_shutter).font = FONT_BOLD
-        ws_stone.cell(row=r_idx, column=9).number_format = '0.00'
-        ws_stone.cell(row=r_idx, column=10, value=total_weight).font = FONT_BOLD
-        ws_stone.cell(row=r_idx, column=10).number_format = '0.00'
-        for col in range(1, 11):
-            ws_stone.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-        auto_fit(ws_stone)
+        items = getattr(project, 'tiles_items', []) or []
+        waste_pct = fnum(getattr(project, 'tiles_waste_percentage', 0.0))
+        total = 0.0
+        row = 2
+        for idx, it in enumerate(items, 1):
+            desc = val(it, 'desc', None) or val(it, 'description', '')
+            area = fnum(val(it, 'area', 0.0))
+            with_waste = area * (1.0 + (waste_pct / 100.0))
+            write_row(ws, row, [idx, desc, area, with_waste])
+            total += area
+            row += 1
 
-    # 8. WALLS (الجدران)
-    if should_gen('walls'):
-        ws_walls = wb.create_sheet("الجدران")
-        setup_sheet(ws_walls, "الجدران")
-        headers_walls = [
-            "م", "اسم الجدار", "الطبقة", "الطول (م)", "الارتفاع (م)", 
-            "المساحة القائمة (م²)", "الخصومات (م²)", "المساحة الصافية (م²)"
-        ]
-        write_header(ws_walls, headers_walls)
-        
-        r_idx = 2
-        total_wall_len = 0.0
-        total_wall_gross = 0.0
-        total_wall_deduct = 0.0
-        total_wall_net = 0.0
-        
-        for i, w in enumerate(project.walls, 1):
-            name = val(w, 'name', f'Wall{i}')
-            layer = val(w, 'layer', '-')
-            length = float(val(w, 'length', 0.0) or 0.0)
-            height = float(val(w, 'height', 0.0) or 0.0)
-            gross = float(val(w, 'gross_area', 0.0) or val(w, 'gross', 0.0) or 0.0)
-            if gross == 0 and length > 0 and height > 0:
-                gross = length * height
-            deduct = float(val(w, 'deduction_area', 0.0) or val(w, 'deduct', 0.0) or 0.0)
-            net = float(val(w, 'net_area', 0.0) or val(w, 'net', 0.0) or 0.0)
-            if net == 0:
-                net = max(0, gross - deduct)
-            
-            total_wall_len += length
-            total_wall_gross += gross
-            total_wall_deduct += deduct
-            total_wall_net += net
-            
-            write_row(ws_walls, r_idx, [i, name, layer, length, height, gross, deduct, net])
-            r_idx += 1
-        
-        # Totals row
-        ws_walls.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_walls.cell(row=r_idx, column=4, value=total_wall_len).font = FONT_BOLD
-        ws_walls.cell(row=r_idx, column=4).number_format = '0.00'
-        ws_walls.cell(row=r_idx, column=6, value=total_wall_gross).font = FONT_BOLD
-        ws_walls.cell(row=r_idx, column=6).number_format = '0.00'
-        ws_walls.cell(row=r_idx, column=7, value=total_wall_deduct).font = FONT_BOLD
-        ws_walls.cell(row=r_idx, column=7).number_format = '0.00'
-        ws_walls.cell(row=r_idx, column=8, value=total_wall_net).font = FONT_BOLD
-        ws_walls.cell(row=r_idx, column=8).number_format = '0.00'
-        for col in range(1, 9):
-            ws_walls.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-        auto_fit(ws_walls)
+        row += 1
+        ws.cell(row=row, column=2, value="الإجمالي" ).font = FONT_BOLD
+        ws.cell(row=row, column=3, value=total).font = FONT_BOLD
+        ws.cell(row=row, column=4, value=total * (1.0 + (waste_pct / 100.0))).font = FONT_BOLD
+        auto_fit(ws)
 
-    # 9. CEILING TILES (الأسقف المستعارة)
-    # Assuming we list all ceilings, user can filter
-    if should_gen('ceiling_tiles'):
-        ws_ceil = wb.create_sheet("الأسقف المستعارة")
-        setup_sheet(ws_ceil, "الأسقف المستعارة")
-        headers_ceil = ["م", "الغرفة", "نوع الغرفة", "المساحة (م²)", "ملاحظات"]
-        write_header(ws_ceil, headers_ceil)
-        
-        r_idx = 2
-        total_ceil_area = 0.0
-        
-        for i, r in enumerate(project.rooms, 1):
-            name = val(r, 'name', '-')
-            room_type = val(r, 'room_type', '[غير محدد]') or '[غير محدد]'
-            area = float(val(r, 'area', 0.0) or 0.0)
-            # Check if ceramic ceiling exists
-            breakdown = val(r, 'ceramic_breakdown', {}) or {}
-            c_ceil = float(breakdown.get('ceiling', 0.0) or 0.0)
-            
-            note = ""
-            if c_ceil > 0:
-                note = f"يوجد سيراميك سقف ({c_ceil:.2f} م²)"
-            
-            total_ceil_area += area
-                
-            write_row(ws_ceil, r_idx, [i, name, room_type, area, note])
-            r_idx += 1
-        
-        # Totals row
-        ws_ceil.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_ceil.cell(row=r_idx, column=4, value=total_ceil_area).font = FONT_BOLD
-        ws_ceil.cell(row=r_idx, column=4).number_format = '0.00'
-        for col in range(1, 6):
-            ws_ceil.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-        auto_fit(ws_ceil)
-
-    # 10. FLOOR TILES (بلاط الأرضيات)
-    if should_gen('floor_tiles'):
-        ws_floor = wb.create_sheet("بلاط الأرضيات")
-        setup_sheet(ws_floor, "بلاط الأرضيات")
-        headers_floor = ["م", "الغرفة", "نوع الغرفة", "المساحة (م²)", "سيراميك أرضية؟", "ملاحظات"]
-        write_header(ws_floor, headers_floor)
-        
-        r_idx = 2
-        total_floor = 0.0
-        total_cer_floor = 0.0
-        
-        for i, r in enumerate(project.rooms, 1):
-            name = val(r, 'name', '-')
-            room_type = val(r, 'room_type', '[غير محدد]') or '[غير محدد]'
-            area = float(val(r, 'area', 0.0) or 0.0)
-            
-            breakdown = val(r, 'ceramic_breakdown', {}) or {}
-            c_floor = float(breakdown.get('floor', 0.0) or 0.0)
-            
-            has_cer = "نعم" if c_floor > 0 else "لا"
-            note = f"سيراميك: {c_floor:.2f} م²" if c_floor > 0 else ""
-            
-            total_floor += area
-            total_cer_floor += c_floor
-                
-            write_row(ws_floor, r_idx, [i, name, room_type, area, has_cer, note])
-            r_idx += 1
-        
-        # Totals row
-        ws_floor.cell(row=r_idx, column=2, value="الإجمالي").font = FONT_BOLD
-        ws_floor.cell(row=r_idx, column=4, value=total_floor).font = FONT_BOLD
-        ws_floor.cell(row=r_idx, column=4).number_format = '0.00'
-        ws_floor.cell(row=r_idx, column=6, value=f"إجمالي السيراميك: {total_cer_floor:.2f} م²").font = FONT_BOLD
-        for col in range(1, 7):
-            ws_floor.cell(row=r_idx, column=col).fill = PatternFill(start_color=COLOR_TOTAL_BG, end_color=COLOR_TOTAL_BG, fill_type="solid")
-            ws_floor.cell(row=r_idx, column=col).border = BORDER_THIN
-        auto_fit(ws_floor)
-
-    # Remove default sheet if it's still there and empty (only if we created others)
-    if len(wb.sheetnames) > 1 and 'Sheet' in wb.sheetnames:
-        try:
-            wb.remove(wb['Sheet'])
-        except:
-            pass
-
-    # Save
     try:
         wb.save(filepath)
-        if status_cb:
-            status_cb(f"تم حفظ الملف: {filepath}", "✅")
+        if status_cb: status_cb(f"Saved: {filepath}", "✅")
         return True
     except Exception as e:
-        if status_cb:
-            status_cb(f"خطأ في الحفظ: {e}", "❌")
+        if status_cb: status_cb(f"Error: {e}", "❌")
         return False
-

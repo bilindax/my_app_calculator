@@ -213,7 +213,7 @@ def build_opening_record(
     return record
 
 
-def format_number(value: Any, digits: int = 2, default: str = '-') -> str:
+def format_number(value: Any, digits: int = 2, default: str = '-', thousands: bool = False) -> str:
     """
     Format a numeric value for display in UI.
     
@@ -236,6 +236,9 @@ def format_number(value: Any, digits: int = 2, default: str = '-') -> str:
         '-'
     """
     try:
-        return f"{float(value):.{digits}f}"
+        num = float(value)
+        if thousands:
+            return f"{num:,.{digits}f}"
+        return f"{num:.{digits}f}"
     except (TypeError, ValueError):
         return default

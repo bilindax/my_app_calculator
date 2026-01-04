@@ -878,24 +878,31 @@ class RoomsTab(BaseTab):
             
             selected_rooms = self._get_selected_rooms()
 
-            # If user selected multiple rooms, apply directly to selection.
+            # If nothing selected, choose scope.
             apply_to_all_visible = False
+            apply_to_all_project = False
             if not selected_rooms:
-                choice = messagebox.askquestion(
+                choice = messagebox.askyesnocancel(
                     "Change Wall Height",
                     "No rooms selected.\n\n"
-                    "YES = Apply to ALL visible rooms\n"
-                    "NO = Cancel (select rooms first)",
+                    "YES = Apply to ALL rooms in the PROJECT\n"
+                    "NO  = Apply to ALL VISIBLE rooms (current filter)\n"
+                    "CANCEL = Cancel",
                     icon='question',
                     parent=self.frame
                 )
-                if choice != 'yes':
-                    self.app.update_status("Select one or more rooms first.", icon="ℹ️")
+                if choice is None:
                     return
-                apply_to_all_visible = True
+                if choice is True:
+                    apply_to_all_project = True
+                else:
+                    apply_to_all_visible = True
 
             target_rooms = selected_rooms
-            if apply_to_all_visible:
+            if apply_to_all_project:
+                # Apply to all rooms regardless of current filter.
+                target_rooms = list(self.app.project.rooms or [])
+            elif apply_to_all_visible:
                 target_rooms = [
                     self._room_iid_to_record[iid]
                     for iid in (self.rooms_tree.get_children() or [])
@@ -930,7 +937,7 @@ class RoomsTab(BaseTab):
                 updated_count += 1
 
             # Recalculate
-            if hasattr(self.app, 'auto_calculate_all_rooms') and (apply_to_all_visible or len(selected_rooms) > 1):
+            if hasattr(self.app, 'auto_calculate_all_rooms') and (apply_to_all_project or apply_to_all_visible or len(selected_rooms) > 1):
                 self.app.auto_calculate_all_rooms()
             elif hasattr(self.app, 'auto_calculate_room'):
                 self.app.auto_calculate_room()

@@ -13,7 +13,22 @@ try:
     import win32com.client
     import pythoncom
 except ImportError:
-    raise ImportError("pywin32 is required. Install with: pip install pywin32")
+    # Allow importing the module even when pywin32 isn't installed.
+    # The app can still run; AutoCAD-only features will fail gracefully.
+    win32com = None
+
+    class _DummyPythoncom:
+        class com_error(Exception):
+            pass
+
+        VT_ARRAY = 0
+        VT_R8 = 0
+
+        @staticmethod
+        def PumpWaitingMessages():
+            return None
+
+    pythoncom = _DummyPythoncom()
 
 
 class AutoCADPicker:
@@ -37,6 +52,8 @@ class AutoCADPicker:
             acad_app: AutoCAD application object
             doc: Active document object
         """
+        if win32com is None:
+            raise RuntimeError("pywin32 is required for AutoCAD integration. Install with: pip install pywin32")
         self.acad = acad_app
         self.doc = doc
     

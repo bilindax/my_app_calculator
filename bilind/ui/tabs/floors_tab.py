@@ -3,11 +3,15 @@ from tkinter import ttk, messagebox, simpledialog
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from bilind.models.room import FLOOR_PROFILES
-# Legacy room_metrics removed - uses UnifiedCalculator instead
+from bilind.calculations.unified_calculator import UnifiedCalculator, RoomCalculations
 from .base_tab import BaseTab
 
 if TYPE_CHECKING:
     from bilind_main import BilindEnhanced
+
+
+# Type alias for cached metrics map
+RoomMetricsContext = Dict[str, RoomCalculations]
 
 
 class FloorsTab(BaseTab):
@@ -131,14 +135,10 @@ class FloorsTab(BaseTab):
         return float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
     
     def _build_metrics_context(self) -> RoomMetricsContext:
-        """Build and cache metrics context for calculations."""
-        self._ctx_cache = build_room_metrics_context(
-            self.app.project.rooms,
-            self.app.project.doors,
-            self.app.project.windows,
-            self.app.project.ceramic_zones,
-            default_wall_height=self._get_default_wall_height()
-        )
+        """Build and cache room metrics using UnifiedCalculator (SSOT)."""
+        calc = UnifiedCalculator(self.app.project)
+        calcs = calc.calculate_all_rooms()
+        self._ctx_cache = {c.room_name: c for c in calcs}
         return self._ctx_cache
     
     def _get_ctx(self) -> RoomMetricsContext:
@@ -146,6 +146,12 @@ class FloorsTab(BaseTab):
         if self._ctx_cache is None:
             return self._build_metrics_context()
         return self._ctx_cache
+
+    def _get_metrics_for_room(self, room: Any) -> Optional[RoomCalculations]:
+        """Return RoomCalculations for a room if available."""
+        ctx = self._get_ctx()
+        name = self.app._room_name(room)
+        return ctx.get(name)
     
     def _invalidate_ctx(self):
         """Clear the cached context (call when data changes)."""
@@ -217,17 +223,16 @@ class FloorsTab(BaseTab):
         if not self.selected_floor:
             return
         
-        # Use cached context
-        ctx = self._get_ctx()
-            
         for room in self.app.project.rooms:
             rf = self.app._room_attr(room, 'floor_profile', 'floor_profile', '[Not Set]')
             if rf == self.selected_floor:
                 name = self.app._room_name(room)
-                metrics = calculate_room_finish_metrics(room, ctx)
-                area = metrics.area
+                metrics = self._get_metrics_for_room(room)
+                if not metrics:
+                    continue
+                area = metrics.ceiling_area  # floor area
                 walls = metrics.walls_gross
-                rtype = metrics.room_type
+                rtype = self.app._room_attr(room, 'room_type', 'room_type', '[Not Set]')
                 self.assigned_tree.insert('', tk.END, values=(name, f"{area:.2f}", f"{walls:.2f}", rtype))
 
     def _refresh_available_rooms(self):
@@ -371,19 +376,17 @@ class FloorsTab(BaseTab):
         t_plaster = 0.0
         t_ceramic = 0.0
         t_paint = 0.0
-        
-        # Use cached metrics context
-        ctx = self._get_ctx()
-        
+
         for room in self.app.project.rooms:
             rf = self.app._room_attr(room, 'floor_profile', 'floor_profile', '[Not Set]')
             if rf == self.selected_floor:
-                # Calculate actual metrics using room_metrics
-                metrics = calculate_room_finish_metrics(room, ctx)
-                t_area += metrics.area
+                metrics = self._get_metrics_for_room(room)
+                if not metrics:
+                    continue
+                t_area += metrics.ceiling_area
                 t_walls += metrics.walls_gross
                 t_plaster += metrics.plaster_total
-                t_ceramic += metrics.ceramic_total
+                t_ceramic += (metrics.ceramic_wall + metrics.ceramic_floor + metrics.ceramic_ceiling)
                 t_paint += metrics.paint_total
                 
         self.lbl_total_area.config(text=f"Total Area: {t_area:.2f} m²")

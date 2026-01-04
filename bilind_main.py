@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext, simpledialog
 import csv
 import os
+from pathlib import Path
 from datetime import datetime
 import time
 import threading
@@ -22,7 +23,13 @@ from bilind.core.config import DOOR_TYPES, WINDOW_TYPES, COLOR_SCHEME
 from bilind.core.theme import ThemeManager
 from bilind.ui.modern_styles import ModernStyleManager
 from bilind.calculations.helpers import build_opening_record, format_number
-# Legacy room_metrics removed - uses UnifiedCalculator instead
+from bilind.calculations.unified_calculator import UnifiedCalculator
+from bilind.calculations.room_metrics import (
+    RoomMetricsContext,
+    RoomFinishMetrics,
+    build_room_metrics_context,
+    calculate_room_finish_metrics,
+)
 from bilind.models import Room, Opening, Wall, FinishItem
 from bilind.models.project import Project
 from bilind.models.finish import CeramicZone
@@ -46,13 +53,23 @@ from bilind.models.room import ROOM_TYPES
 from bilind.export import export_to_csv, export_to_pdf, export_comprehensive_book, insert_table_to_autocad
 from bilind.core.project_manager import save_project, load_project
 
+HAS_AUTOCAD_DEPS = True
 try:
     from pyautocad import Autocad
     import win32com.client
     import pythoncom
 except ImportError:
-    messagebox.showerror("Missing Dependencies", "Please run: pip install pyautocad pywin32 openpyxl")
-    exit(1)
+    # Allow the app to run without AutoCAD dependencies.
+    # AutoCAD-only features will prompt the user when used.
+    HAS_AUTOCAD_DEPS = False
+    Autocad = None
+    win32com = None
+
+    class _DummyPythoncom:
+        class com_error(Exception):
+            pass
+
+    pythoncom = _DummyPythoncom()
 
 try:
     import openpyxl
@@ -99,8 +116,12 @@ class BilindEnhanced:
             root (tk.Tk): The root Tkinter window.
         """
         self.root = root
-        self.root.title("BILIND Enhanced - AutoCAD Calculator")
+        self.root.title("BILIND Enhanced")
         self.root.geometry("1040x780")
+
+        # App icon (works even without AutoCAD)
+        self._icon_image = None
+        self._set_app_icon()
         
         # Modern styling with ttkbootstrap
         self.modern_style = ModernStyleManager(root, theme_name='cyborg')
@@ -120,22 +141,12 @@ class BilindEnhanced:
         self.door_types = DOOR_TYPES
         self.window_types = WINDOW_TYPES
         
-        # AutoCAD connection
-        try:
-            self.update_status("Connecting to AutoCAD...", icon="🔄")
-            self.acad = Autocad(create_if_not_exists=False)
-            self.doc = self.acad.doc
-            self.update_status(f"Connected to {self.doc.Name}", icon="✅")
-            self.picker = AutoCADPicker(self.acad, self.doc)
-        except Exception as e:
-            messagebox.showerror(
-                "AutoCAD Connection Failed",
-                "Could not connect to a running instance of AutoCAD.\n\n"
-                "Please ensure AutoCAD is running and try again.\n\n"
-                f"Details: {e}"
-            )
-            self.root.destroy()
-            return
+        # AutoCAD connection is optional (connect lazily, on-demand)
+        self.acad = None
+        self.doc = None
+        self.picker = None
+        self._autocad_connected_once = False
+        self._connect_autocad(initial=True)
 
         # --- Data Storage ---
         self.project = Project()
@@ -161,6 +172,88 @@ class BilindEnhanced:
         self.create_ui()
         self.create_menu()
         self._install_global_mousewheel()
+
+    def _app_root_dir(self) -> Path:
+        return Path(__file__).resolve().parent
+
+    def _set_app_icon(self) -> None:
+        """Set a custom app icon (Windows/Linux). Safe to call repeatedly."""
+        try:
+            icon_path = self._app_root_dir() / 'bilind' / 'assets' / 'bilind_icon.ppm'
+            if icon_path.exists():
+                self._icon_image = tk.PhotoImage(file=str(icon_path))
+                self.root.iconphoto(True, self._icon_image)
+        except Exception:
+            # Non-fatal: icon is cosmetic.
+            self._icon_image = None
+
+    def _doc_display_name(self) -> str:
+        try:
+            if self.doc is not None and hasattr(self.doc, 'Name'):
+                return str(self.doc.Name)
+        except Exception:
+            pass
+        return "(AutoCAD not connected)"
+
+    def _refresh_window_title(self) -> None:
+        try:
+            self.root.title(f"BILIND Enhanced - {self._doc_display_name()}")
+        except Exception:
+            pass
+
+    def _connect_autocad(self, *, initial: bool = False, show_message: bool = False) -> bool:
+        """Try connecting to a running AutoCAD instance. Returns True on success."""
+        if not HAS_AUTOCAD_DEPS or Autocad is None:
+            self.acad = None
+            self.doc = None
+            self.picker = None
+            if show_message and not initial:
+                messagebox.showwarning(
+                    "AutoCAD Not Available",
+                    "AutoCAD integration is not available because dependencies are missing.\n\n"
+                    "Install: pip install pyautocad pywin32"
+                )
+            self.update_status("AutoCAD not available (dependencies missing)", icon="⚠️")
+            self._refresh_window_title()
+            return False
+
+        try:
+            if initial:
+                self.update_status("AutoCAD: not connected (you can connect when needed)", icon="⚙️")
+
+            acad = Autocad(create_if_not_exists=False)
+            doc = acad.doc
+            picker = AutoCADPicker(acad, doc)
+
+            self.acad = acad
+            self.doc = doc
+            self.picker = picker
+            self._autocad_connected_once = True
+
+            self.update_status(f"Connected to {self._doc_display_name()}", icon="✅")
+            self._refresh_window_title()
+            return True
+        except Exception as e:
+            self.acad = None
+            self.doc = None
+            self.picker = None
+
+            if show_message and not initial:
+                messagebox.showwarning(
+                    "AutoCAD Not Available",
+                    "AutoCAD must be running with a drawing open for picking.\n\n"
+                    f"Details: {e}"
+                )
+            if not initial:
+                self.update_status("AutoCAD not connected", icon="⚠️")
+            self._refresh_window_title()
+            return False
+
+    def ensure_autocad(self) -> bool:
+        """Ensure AutoCAD is connected (connects on-demand)."""
+        if self.acad is not None and self.doc is not None and self.picker is not None:
+            return True
+        return self._connect_autocad(initial=False, show_message=True)
 
     def apply_theme(self, name: str):
         """Apply a theme by name and refresh styles across the app."""
@@ -273,7 +366,7 @@ class BilindEnhanced:
             self.current_project_path = None
             self._sync_project_references()
             self._rebuild_association()
-            self.root.title(f"BILIND Enhanced - New Project - {self.doc.Name}")
+            self._refresh_window_title()
             self.refresh_all_tabs()
             self.update_status("✨ New project started.", icon="📄")
 
@@ -747,7 +840,8 @@ class BilindEnhanced:
 
     def _fmt(self, value, digits=2, default='-'):
         """Format numeric value for display using imported helper."""
-        return format_number(value, digits, default)
+        use_thousands = bool(getattr(self.project, 'use_thousands_separator', False))
+        return format_number(value, digits, default, thousands=use_thousands)
 
     def _calc_costs(self):
         """Bridge to CostsTab calculation logic."""
@@ -2037,7 +2131,7 @@ class BilindEnhanced:
         )
     
     def auto_calculate_all_rooms(self):
-        """Automatically calculate finishes for ALL rooms with valid wall heights."""
+        """Automatically calculate finishes for ALL rooms using UnifiedCalculator."""
         if not self.project.rooms:
             messagebox.showwarning("Warning", "No rooms to calculate.")
             return
@@ -2045,31 +2139,53 @@ class BilindEnhanced:
         # Ask for confirmation
         result = messagebox.askyesno(
             "Auto Calculate All",
-            f"This will calculate finishes for {len(self.project.rooms)} room(s).\\n\\n"
-            "Rooms without wall height will be skipped.\\n\\n"
+            f"This will calculate finishes for {len(self.project.rooms)} room(s) using Unified Calculator.\\n\\n"
             "Continue?"
         )
         if not result:
             return
         
-        calculated = 0
-        skipped = 0
-        ctx = self._build_room_metrics_context()
+        # Use UnifiedCalculator
+        calc = UnifiedCalculator(self.project)
+        results = calc.calculate_all_rooms()
         
-        for room in self.project.rooms:
-            wall_h = self._room_attr(room, 'wall_height', 'wall_height', None)
-            segments = self._room_attr(room, 'wall_segments', 'wall_segments', []) or []
-            if (wall_h in (None, '', 0, 0.0)) and not segments:
-                skipped += 1
+        calculated = 0
+        
+        for i, room in enumerate(self.project.rooms):
+            # Find result for this room
+            room_name = self._room_name(room)
+            res = next((r for r in results if r.room_name == room_name), None)
+            
+            if not res:
                 continue
-            self._recompute_room_finish(room, context=ctx)
+            
+            # Update room attributes
+            breakdown = {
+                'wall': res.ceramic_wall,
+                'ceiling': res.ceramic_ceiling,
+                'floor': res.ceramic_floor,
+            }
+            
+            if isinstance(room, dict):
+                room['wall_finish_area'] = res.walls_net
+                room['ceiling_finish_area'] = res.ceiling_area
+                room['plaster_area'] = res.plaster_total
+                room['paint_area'] = res.paint_total
+                room['ceramic_area'] = res.ceramic_wall + res.ceramic_ceiling + res.ceramic_floor
+                room['ceramic_breakdown'] = breakdown
+            else:
+                room.wall_finish_area = res.walls_net
+                room.ceiling_finish_area = res.ceiling_area
+                room.plaster_area = res.plaster_total
+                room.paint_area = res.paint_total
+                room.ceramic_area = res.ceramic_wall + res.ceramic_ceiling + res.ceramic_floor
+                room.ceramic_breakdown = breakdown
+            
             calculated += 1
         
         self.refresh_rooms()
         
-        msg = f"✅ Calculated finishes for {calculated} room(s)"
-        if skipped > 0:
-            msg += f"\\n⚠️ Skipped {skipped} room(s) without wall height"
+        msg = f"✅ Calculated finishes for {calculated} room(s) using Unified Calculator"
         
         messagebox.showinfo("Auto Calculate All - Complete", msg)
         self.update_status(f"Auto-calculated {calculated} rooms", icon="⚡⚡")
@@ -2456,6 +2572,11 @@ class BilindEnhanced:
             
             # Pick wall from AutoCAD
             self.update_status(f"Pick wall(s) for {room_name}...", icon="🧱")
+
+            if not self.ensure_autocad():
+                if not walls:
+                    return []
+                break
             
             try:
                 picked_lines = self.picker.pick_walls(scale=self.scale, height=3.0)  # Temp height
@@ -2763,6 +2884,9 @@ class BilindEnhanced:
         5. Scale is applied to project and UI
         """
         from tkinter import simpledialog
+
+        if not self.ensure_autocad():
+            return
         
         self.update_status("📏 Calibration: Pick first point in AutoCAD...", icon="📏")
         self.root.withdraw()
@@ -2876,6 +3000,9 @@ class BilindEnhanced:
         to determine width and length from the bounding box.
         """
         self.update_scale()
+
+        if not self.ensure_autocad():
+            return
         self.update_status("Picking rooms from AutoCAD... Please select objects.", icon="🏠")
         self.root.withdraw()
         
@@ -2943,6 +3070,9 @@ class BilindEnhanced:
         Allows picking multiple batches of different room types without closing the tool.
         """
         self.update_scale()
+
+        if not self.ensure_autocad():
+            return
         
         # Hide main window
         self.root.withdraw()
@@ -3057,6 +3187,9 @@ class BilindEnhanced:
         icon = "🚪" if is_door else "🪟"
         
         self.update_scale()
+
+        if not self.ensure_autocad():
+            return
         self.update_status(f"Picking {name} from AutoCAD...", icon=icon)
         self.root.withdraw()
 
@@ -3125,6 +3258,9 @@ class BilindEnhanced:
     def pick_walls(self):
         """Pick walls from AutoCAD and add to project using current scale."""
         self.update_scale()
+
+        if not self.ensure_autocad():
+            return
         try:
             default_height = getattr(self, 'last_wall_height', 3.0)
             height_str = simpledialog.askstring("Wall Height", "Enter wall height (meters):", initialvalue=f"{default_height}")
@@ -5008,6 +5144,8 @@ class BilindEnhanced:
 
     def insert_table_to_autocad(self):
         """Wrapper to call the AutoCAD table insertion function."""
+        if not self.ensure_autocad():
+            return
         insert_table_to_autocad(
             project=self.project,
             acad=self.acad,

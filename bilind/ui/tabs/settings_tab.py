@@ -125,6 +125,67 @@ class SettingsTab(BaseTab):
             width=10
         )
         height_spin.pack(side=tk.LEFT)
+
+        def apply_default_height_to_all_rooms():
+            try:
+                h = float(self.wall_height_var.get())
+            except Exception:
+                messagebox.showerror("Invalid Input", "Please enter a valid wall height.")
+                return
+            if h <= 0:
+                messagebox.showerror("Invalid Input", "Wall height must be positive.")
+                return
+
+            if not messagebox.askyesno(
+                "Apply to All Rooms",
+                f"Apply wall height = {h:.2f} m to ALL rooms in this project?\n\n"
+                "This will update room wall height and any per-room wall objects, then recalculate."
+            ):
+                return
+
+            updated = 0
+            for room in (self.app.project.rooms or []):
+                try:
+                    if isinstance(room, dict):
+                        room['wall_height'] = h
+                        room['wall_segments'] = []
+                        walls = room.get('walls') or []
+                    else:
+                        setattr(room, 'wall_height', h)
+                        setattr(room, 'wall_segments', [])
+                        walls = getattr(room, 'walls', []) or []
+
+                    for w in walls:
+                        try:
+                            if isinstance(w, dict):
+                                w['height'] = h
+                            else:
+                                setattr(w, 'height', h)
+                        except Exception:
+                            continue
+
+                    updated += 1
+                except Exception:
+                    continue
+
+            # Recalculate using the app if available
+            try:
+                if hasattr(self.app, 'auto_calculate_all_rooms'):
+                    self.app.auto_calculate_all_rooms()
+            except Exception:
+                pass
+
+            if hasattr(self.app, 'refresh_all_tabs'):
+                self.app.refresh_all_tabs()
+
+            self.app.update_status(f"Applied wall height to {updated} room(s)", icon="✅")
+
+        self.create_button(
+            row1,
+            "Apply to All Rooms",
+            apply_default_height_to_all_rooms,
+            'Secondary.TButton'
+        ).pack(side=tk.LEFT, padx=10)
         
         ttk.Label(
             row1,
@@ -132,6 +193,403 @@ class SettingsTab(BaseTab):
             foreground=self.app.colors['text_muted'],
             style='Caption.TLabel'
         ).pack(side=tk.LEFT)
+
+        # Drawing scale factor (AutoCAD units -> meters)
+        row_scale = ttk.Frame(section, style='Main.TFrame')
+        row_scale.pack(fill=tk.X, pady=(12, 6))
+
+        ttk.Label(
+            row_scale,
+            text="Drawing Scale Factor:",
+            style='Body.TLabel'
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        # This is the factor used by pickers: meters = drawing_units * scale
+        self.scale_var = tk.DoubleVar(value=float(getattr(self.app.project, 'scale', 1.0) or 1.0))
+        scale_entry = ttk.Entry(row_scale, textvariable=self.scale_var, width=12)
+        scale_entry.pack(side=tk.LEFT)
+
+        ttk.Label(
+            row_scale,
+            text="(meters = AutoCAD units × factor)",
+            foreground=self.app.colors['text_muted'],
+            style='Caption.TLabel'
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        row_scale2 = ttk.Frame(section, style='Main.TFrame')
+        row_scale2.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(row_scale2, text="Quick preset:", style='Body.TLabel').pack(side=tk.LEFT, padx=(0, 12))
+        presets = [
+            ("Meters (m)", 1.0),
+            ("Centimeters (cm)", 0.01),
+            ("Millimeters (mm)", 0.001),
+            ("1:50", 0.02),
+            ("1:100", 0.01),
+            ("1:200", 0.005),
+        ]
+        preset_map = {name: val for name, val in presets}
+        self._scale_preset_var = tk.StringVar(value="Meters (m)")
+        preset_combo = ttk.Combobox(
+            row_scale2,
+            textvariable=self._scale_preset_var,
+            values=[name for name, _ in presets],
+            width=18,
+            state='readonly'
+        )
+        preset_combo.pack(side=tk.LEFT)
+
+        def _apply_preset(event=None):
+            try:
+                name = self._scale_preset_var.get()
+                val = float(preset_map.get(name, 1.0))
+                self.scale_var.set(val)
+            except Exception:
+                pass
+
+        preset_combo.bind('<<ComboboxSelected>>', _apply_preset)
+
+        def apply_scale_only():
+            try:
+                new_scale = float(self.scale_var.get())
+            except Exception:
+                messagebox.showerror("Invalid Input", "Please enter a valid scale factor.")
+                return
+            if new_scale <= 0:
+                messagebox.showerror("Invalid Input", "Scale factor must be positive.")
+                return
+            self.app.project.scale = new_scale
+            self.app.scale = new_scale
+            self.app.update_status(f"Scale factor set to {new_scale:g}", icon="📐")
+            if hasattr(self.app, 'refresh_all_tabs'):
+                self.app.refresh_all_tabs()
+
+        def fix_existing_measurements():
+            """Rescale already-imported geometry by asking user about source/target units."""
+            # Create dialog to ask about source and target units
+            fix_dialog = tk.Toplevel(self.parent)
+            fix_dialog.title("Fix Scale - تصحيح المقياس")
+            dialog_w, dialog_h = 650, 540
+            fix_dialog.geometry(f"{dialog_w}x{dialog_h}")
+            fix_dialog.configure(bg=self.app.colors['bg_secondary'])
+            fix_dialog.transient(self.parent)
+            fix_dialog.grab_set()
+            fix_dialog.minsize(620, 500)
+            fix_dialog.resizable(True, True)
+
+            # Center dialog
+            fix_dialog.update_idletasks()
+            try:
+                x = self.parent.winfo_rootx() + (self.parent.winfo_width() - dialog_w) // 2
+                y = self.parent.winfo_rooty() + (self.parent.winfo_height() - dialog_h) // 2
+                fix_dialog.geometry(f"+{x}+{y}")
+            except:
+                pass
+
+            result = {'proceed': False, 'factor': 1.0}
+
+            # Header
+            header = ttk.Frame(fix_dialog, style='Main.TFrame', padding=(20, 15))
+            header.pack(fill=tk.X)
+            ttk.Label(
+                header,
+                text="🔧 Fix Existing Measurements",
+                font=('Segoe UI Semibold', 14),
+                foreground=self.app.colors['accent']
+            ).pack(anchor=tk.W)
+            ttk.Label(
+                header,
+                text="Convert imported data from one unit to another",
+                foreground=self.app.colors['text_secondary']
+            ).pack(anchor=tk.W, pady=(4, 0))
+
+            # Buttons first (at bottom)
+            btn_frame = ttk.Frame(fix_dialog, style='Main.TFrame', padding=(20, 15))
+            btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+            # Content
+            content = ttk.Frame(fix_dialog, style='Main.TFrame', padding=20)
+            content.pack(fill=tk.BOTH, expand=True)
+
+            # Example box
+            example_frame = ttk.LabelFrame(content, text="مثال - Example", padding=12)
+            example_frame.pack(fill=tk.X, pady=(0, 15))
+            ttk.Label(
+                example_frame,
+                text="If 120cm shows as 120m, choose:\n"
+                     "  Current data: Centimeters (cm)\n"
+                     "  Convert to: Meters (m)",
+                foreground=self.app.colors['text_secondary'],
+                justify=tk.LEFT
+            ).pack(anchor=tk.W)
+
+            # Unit presets
+            unit_presets = [
+                ("Meters (m) - أمتار", 1.0),
+                ("Centimeters (cm) - سنتيمتر", 0.01),
+                ("Millimeters (mm) - ملليمتر", 0.001),
+                ("Scale 1:50 - مقياس", 0.02),
+                ("Scale 1:100 - مقياس", 0.01),
+                ("Scale 1:200 - مقياس", 0.005),
+            ]
+            unit_map = {name: val for name, val in unit_presets}
+
+            # Source units
+            ttk.Label(
+                content,
+                text="Current data is in:",
+                font=('Segoe UI', 10, 'bold'),
+                foreground=self.app.colors['text_primary']
+            ).pack(anchor=tk.W, pady=(5, 5))
+            source_var = tk.StringVar(value="Meters (m) - أمتار")
+            source_combo = ttk.Combobox(
+                content,
+                textvariable=source_var,
+                values=[name for name, _ in unit_presets],
+                width=35,
+                state='readonly'
+            )
+            source_combo.pack(fill=tk.X, pady=(0, 15))
+
+            # Target units
+            ttk.Label(
+                content,
+                text="Convert to:",
+                font=('Segoe UI', 10, 'bold'),
+                foreground=self.app.colors['text_primary']
+            ).pack(anchor=tk.W, pady=(5, 5))
+            target_var = tk.StringVar(value="Centimeters (cm) - سنتيمتر")
+            target_combo = ttk.Combobox(
+                content,
+                textvariable=target_var,
+                values=[name for name, _ in unit_presets],
+                width=35,
+                state='readonly'
+            )
+            target_combo.pack(fill=tk.X, pady=(0, 15))
+
+            # Preview frame
+            preview_frame = ttk.LabelFrame(content, text="Preview - معاينة", padding=12)
+            preview_frame.pack(fill=tk.X, pady=(0, 15))
+            
+            preview_label = ttk.Label(
+                preview_frame,
+                text="Factor: ×1.0\nExample: 120 → 120",
+                foreground=self.app.colors['accent'],
+                font=('Segoe UI', 9)
+            )
+            preview_label.pack(anchor=tk.W)
+
+            def update_preview(*args):
+                try:
+                    source = unit_map.get(source_var.get(), 1.0)
+                    target = unit_map.get(target_var.get(), 1.0)
+                    factor = target / source
+                    preview_label.config(
+                        text=f"Factor: ×{factor:g}\n"
+                             f"Example: 120 → {120 * factor:g}"
+                    )
+                except:
+                    pass
+
+            source_var.trace_add('write', update_preview)
+            target_var.trace_add('write', update_preview)
+            update_preview()
+
+            # Define button actions before creating buttons
+            def proceed():
+                try:
+                    source = float(unit_map.get(source_var.get(), 1.0))
+                    target = float(unit_map.get(target_var.get(), 1.0))
+                    factor = target / source
+                    if abs(factor - 1.0) < 1e-9:
+                        messagebox.showinfo("No Change", "Source and target are the same; nothing to convert.", parent=fix_dialog)
+                        return
+                    result['factor'] = factor
+                    result['proceed'] = True
+                    fix_dialog.destroy()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Invalid conversion: {e}", parent=fix_dialog)
+
+            # Create buttons in the frame we packed earlier
+            self.create_button(btn_frame, "✅ Convert", proceed, 'Accent.TButton').pack(side=tk.RIGHT, padx=(10, 0))
+            self.create_button(btn_frame, "❌ Cancel", fix_dialog.destroy, 'Secondary.TButton').pack(side=tk.RIGHT)
+
+            fix_dialog.wait_window()
+
+            if not result['proceed']:
+                return
+
+            factor = result['factor']
+
+            def _scale_linear(val):
+                try:
+                    return float(val) * factor
+                except Exception:
+                    return val
+
+            def _scale_area(val):
+                try:
+                    return float(val) * (factor * factor)
+                except Exception:
+                    return val
+
+            # Rooms
+            for room in (self.app.project.rooms or []):
+                try:
+                    if isinstance(room, dict):
+                        for k in ('w', 'l', 'perim'):
+                            if k in room and room[k] is not None:
+                                room[k] = _scale_linear(room[k])
+                        for k in ('area', 'ceiling_finish_area', 'wall_finish_area', 'ceramic_area'):
+                            if k in room and room[k] is not None:
+                                room[k] = _scale_area(room[k])
+
+                        # Balcony segments: length is linear, height is meters (leave as-is)
+                        segs = room.get('wall_segments') or []
+                        for seg in segs:
+                            if isinstance(seg, dict) and 'length' in seg and seg.get('length') is not None:
+                                seg['length'] = _scale_linear(seg.get('length'))
+                        # Explicit walls
+                        walls = room.get('walls') or []
+                        for w in walls:
+                            if isinstance(w, dict) and 'length' in w and w.get('length') is not None:
+                                w['length'] = _scale_linear(w.get('length'))
+                    else:
+                        for attr in ('width', 'length', 'perimeter'):
+                            if hasattr(room, attr) and getattr(room, attr) is not None:
+                                setattr(room, attr, _scale_linear(getattr(room, attr)))
+                        for attr in ('area', 'ceiling_finish_area', 'wall_finish_area', 'ceramic_area'):
+                            if hasattr(room, attr) and getattr(room, attr) is not None:
+                                setattr(room, attr, _scale_area(getattr(room, attr)))
+
+                        for seg in getattr(room, 'wall_segments', []) or []:
+                            if isinstance(seg, dict) and seg.get('length') is not None:
+                                seg['length'] = _scale_linear(seg.get('length'))
+
+                        for w in getattr(room, 'walls', []) or []:
+                            try:
+                                if isinstance(w, dict):
+                                    if w.get('length') is not None:
+                                        w['length'] = _scale_linear(w.get('length'))
+                                else:
+                                    if getattr(w, 'length', None) is not None:
+                                        w.length = _scale_linear(w.length)
+                                        # Refresh areas
+                                        if getattr(w, 'gross_area', None) is not None:
+                                            w.gross_area = w.length * float(getattr(w, 'height', 0.0) or 0.0)
+                                        if getattr(w, 'net_area', None) is not None:
+                                            w.net_area = max(0.0, float(w.gross_area or 0.0) - float(getattr(w, 'deduction_area', 0.0) or 0.0))
+                                        if hasattr(w, '_normalize_ceramic_segment'):
+                                            w._normalize_ceramic_segment()
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+
+            # Project walls list
+            for wall in (self.app.project.walls or []):
+                try:
+                    if isinstance(wall, dict):
+                        if wall.get('length') is not None:
+                            wall['length'] = _scale_linear(wall.get('length'))
+                        # Refresh areas if present
+                        try:
+                            h = float(wall.get('height', 0.0) or 0.0)
+                            ln = float(wall.get('length', 0.0) or 0.0)
+                            wall['gross_area'] = ln * h
+                            ded = float(wall.get('deduction_area', 0.0) or 0.0)
+                            wall['net_area'] = max(0.0, wall['gross_area'] - ded)
+                        except Exception:
+                            pass
+                    else:
+                        if getattr(wall, 'length', None) is not None:
+                            wall.length = _scale_linear(wall.length)
+                            wall.gross_area = wall.length * float(getattr(wall, 'height', 0.0) or 0.0)
+                            wall.net_area = max(0.0, float(wall.gross_area or 0.0) - float(getattr(wall, 'deduction_area', 0.0) or 0.0))
+                            if hasattr(wall, '_normalize_ceramic_segment'):
+                                wall._normalize_ceramic_segment()
+                except Exception:
+                    continue
+
+            # Openings (doors/windows)
+            def _fix_openings(collection):
+                for op in (collection or []):
+                    try:
+                        if isinstance(op, dict):
+                            for k in ('w', 'h', 'width', 'height'):
+                                if k in op and op[k] is not None:
+                                    op[k] = _scale_linear(op[k])
+
+                            # Placement height: only scale if it looks like it's in cm/mm (heuristic)
+                            ph = op.get('placement_height', None)
+                            try:
+                                ph_f = float(ph) if ph is not None else None
+                                if ph_f is not None and ph_f > 10:
+                                    op['placement_height'] = _scale_linear(ph_f)
+                            except Exception:
+                                pass
+
+                            qty = int(op.get('qty', op.get('quantity', 1)) or 1)
+                            wv = float(op.get('w', op.get('width', 0.0)) or 0.0)
+                            hv = float(op.get('h', op.get('height', 0.0)) or 0.0)
+                            op['perim_each'] = 2 * (wv + hv)
+                            op['perim'] = op['perim_each'] * qty
+                            op['area_each'] = wv * hv
+                            op['area'] = op['area_each'] * qty
+                            op['stone'] = op['perim']
+                            if str(op.get('opening_type', '')).upper() == 'WINDOW':
+                                op['glass_each'] = op['area_each'] * 0.85
+                                op['glass'] = op['glass_each'] * qty
+                        else:
+                            if getattr(op, 'width', None) is not None:
+                                op.width = _scale_linear(op.width)
+                            if getattr(op, 'height', None) is not None:
+                                op.height = _scale_linear(op.height)
+                            try:
+                                ph = getattr(op, 'placement_height', None)
+                                if ph is not None and float(ph) > 10:
+                                    op.placement_height = _scale_linear(ph)
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+
+            _fix_openings(getattr(self.app.project, 'doors', []))
+            _fix_openings(getattr(self.app.project, 'windows', []))
+
+            # Update scale to target (from the conversion dialog)
+            desired_scale = getattr(self.app.project, 'scale', getattr(self.app, 'scale', 1.0))
+            try:
+                source_scale = float(unit_map.get(source_var.get(), 1.0))
+                target_scale = float(unit_map.get(target_var.get(), 1.0))
+                self.app.project.scale = target_scale
+                self.app.scale = target_scale
+                self.scale_var.set(target_scale)
+                desired_scale = target_scale
+            except:
+                pass
+
+            # Recalculate finishes after geometry update
+            try:
+                if hasattr(self.app, 'auto_calculate_all_rooms'):
+                    self.app.auto_calculate_all_rooms()
+            except Exception:
+                pass
+
+            if hasattr(self.app, 'refresh_all_tabs'):
+                self.app.refresh_all_tabs()
+            self.app.update_status(f"Fixed measurements (×{factor:g}); scale={desired_scale:g}", icon="✅")
+
+        self.create_button(row_scale2, "Apply", apply_scale_only, 'Secondary.TButton').pack(side=tk.LEFT, padx=8)
+        self.create_button(row_scale2, "Fix Existing", fix_existing_measurements, 'Accent.TButton').pack(side=tk.LEFT, padx=4)
+
+        ttk.Label(
+            row_scale2,
+            text="Tip: if 120cm appears as 120m, use 0.01",
+            foreground=self.app.colors['text_muted'],
+            style='Caption.TLabel'
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
     def _create_theme_settings(self, parent):
         """Create theme/density settings section with live apply."""
@@ -287,6 +745,17 @@ class SettingsTab(BaseTab):
             foreground=self.app.colors['text_secondary'],
             style='Caption.TLabel'
         ).pack(anchor=tk.W, pady=(0, 12))
+
+        # Thousands separator toggle
+        row_sep = ttk.Frame(section, style='Main.TFrame')
+        row_sep.pack(fill=tk.X, pady=(0, 10))
+        self.thousands_sep_var = tk.BooleanVar(value=bool(getattr(self.app.project, 'use_thousands_separator', False)))
+        ttk.Checkbutton(
+            row_sep,
+            text="Use thousands separator (e.g., 1,234.56)",
+            variable=self.thousands_sep_var,
+            style='Switch.TCheckbutton'
+        ).pack(side=tk.LEFT)
         
         # General/Legacy precision (kept for backward compatibility)
         row0 = ttk.Frame(section, style='Main.TFrame')
@@ -406,6 +875,7 @@ class SettingsTab(BaseTab):
         try:
             # Validate inputs
             wall_height = self.wall_height_var.get()
+            scale_factor = self.scale_var.get() if hasattr(self, 'scale_var') else self.app.project.scale
             min_opening = self.min_opening_var.get()
             plaster_waste = self.plaster_waste_var.get()
             paint_waste = self.paint_waste_var.get()
@@ -415,8 +885,16 @@ class SettingsTab(BaseTab):
             precision_length = self.precision_length_var.get()
             precision_weight = self.precision_weight_var.get()
             precision_cost = self.precision_cost_var.get()
+            use_thousands = bool(self.thousands_sep_var.get()) if hasattr(self, 'thousands_sep_var') else False
             
             # Apply to project
+            try:
+                scale_factor = float(scale_factor)
+                if scale_factor > 0:
+                    self.app.project.scale = scale_factor
+                    self.app.scale = scale_factor
+            except Exception:
+                pass
             self.app.project.default_wall_height = wall_height
             self.app.project.min_opening_deduction_area = min_opening
             self.app.project.plaster_waste_percentage = plaster_waste
@@ -427,6 +905,7 @@ class SettingsTab(BaseTab):
             self.app.project.decimal_precision_length = precision_length
             self.app.project.decimal_precision_weight = precision_weight
             self.app.project.decimal_precision_cost = precision_cost
+            self.app.project.use_thousands_separator = use_thousands
             
             # Refresh all tabs to apply new settings
             if hasattr(self.app, 'finishes_tab'):
@@ -474,6 +953,8 @@ class SettingsTab(BaseTab):
             self.precision_length_var.set(2)
             self.precision_weight_var.set(1)
             self.precision_cost_var.set(2)
+            if hasattr(self, 'thousands_sep_var'):
+                self.thousands_sep_var.set(False)
             
             self._save_settings()
     
@@ -481,6 +962,11 @@ class SettingsTab(BaseTab):
         """Refresh settings from project (called when tab is shown)."""
         if hasattr(self, 'wall_height_var'):
             self.wall_height_var.set(self.app.project.default_wall_height)
+            if hasattr(self, 'scale_var'):
+                try:
+                    self.scale_var.set(float(getattr(self.app.project, 'scale', 1.0) or 1.0))
+                except Exception:
+                    self.scale_var.set(1.0)
             self.min_opening_var.set(self.app.project.min_opening_deduction_area)
             self.plaster_waste_var.set(self.app.project.plaster_waste_percentage)
             self.paint_waste_var.set(self.app.project.paint_waste_percentage)
@@ -490,3 +976,5 @@ class SettingsTab(BaseTab):
             self.precision_length_var.set(self.app.project.decimal_precision_length)
             self.precision_weight_var.set(self.app.project.decimal_precision_weight)
             self.precision_cost_var.set(self.app.project.decimal_precision_cost)
+            if hasattr(self, 'thousands_sep_var'):
+                self.thousands_sep_var.set(bool(getattr(self.app.project, 'use_thousands_separator', False)))

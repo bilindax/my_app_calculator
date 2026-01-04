@@ -218,6 +218,8 @@ class CostsTab(BaseTab):
 
         proj = self.app.project
 
+        from .helpers.opening_adapter import OpeningAdapter
+
         def _sum_finish_area(items):
             total = 0.0
             for item in items:
@@ -234,10 +236,41 @@ class CostsTab(BaseTab):
                     total += float(opening.get(dict_key, 0.0) or 0.0)
                 elif hasattr(opening, attr_name):
                     val = getattr(opening, attr_name)
-                    total += float(val() if callable(val) else (val or 0.0))
+                    if callable(val):
+                        try:
+                            total += float(val() or 0.0)
+                        except TypeError:
+                            if callable(fallback):
+                                total += float(fallback(opening) or 0.0)
+                            else:
+                                total += 0.0
+                    else:
+                        total += float(val or 0.0)
                 elif callable(fallback):
                     total += float(fallback(opening) or 0.0)
             return total
+
+        def _steel_weight_total(door) -> float:
+            """Total steel weight (kg) for a door opening (dict or dataclass)."""
+            od = OpeningAdapter(door)
+            if od.opening_type != 'DOOR':
+                return 0.0
+
+            mt = str(od.material_type or '')
+            mt_low = mt.lower()
+            is_steel = mt == 'Steel' or ('steel' in mt_low) or ('ستيل' in mt) or ('حديد' in mt)
+            if not is_steel:
+                return 0.0
+
+            if od.weight_each > 0:
+                return float(od.weight_total)
+
+            try:
+                from bilind.core.config import DOOR_TYPES
+                per = float((DOOR_TYPES.get(mt, {}) or {}).get('weight', 0.0) or 0.0)
+                return per * float(od.qty or 0)
+            except Exception:
+                return 0.0
 
         quantities = {
             'Plaster': _sum_finish_area(proj.plaster_items),
@@ -246,7 +279,7 @@ class CostsTab(BaseTab):
             'Doors': _sum_opening_attr(proj.doors, 'qty', 'quantity'),
             'Windows': _sum_opening_attr(proj.windows, 'qty', 'quantity'),
             'Stone': _sum_opening_attr(proj.doors, 'stone', 'stone_linear') + _sum_opening_attr(proj.windows, 'stone', 'stone_linear'),
-            'Steel': _sum_opening_attr(proj.doors, 'weight', 'set_weight', fallback=lambda o: 0.0),
+            'Steel': sum(_steel_weight_total(d) for d in (proj.doors or [])),
             'Glass': _sum_opening_attr(proj.windows, 'glass', 'calculate_glass_area'),
         }
 

@@ -250,9 +250,19 @@ def test_calculate_room_full():
     assert result.walls_openings == 2.0
     assert result.walls_net == 52.0
     assert result.ceiling_area == 20.0
-    assert result.ceramic_wall == 18.0
+    
+    # Ceramic: 18*1 - 1*1 (door overlap) = 17.0
+    assert result.ceramic_wall == 17.0
+    
+    # Plaster: Net Walls (52) + Ceiling (20) = 72
     assert result.plaster_total == 72.0
-    assert abs(result.paint_total - 54.0) < 0.01  # (52-18) + 20
+    
+    # Paint: (Net Walls - Ceramic) + Ceiling
+    # (52 - 17) + 20 = 35 + 20 = 55
+    assert abs(result.paint_total - 55.0) < 0.01
+    
+    # Stone: Door 1x2 -> 2h+w = 4+1 = 5
+    assert result.stone_length == 5.0
     
     print("✅ test_calculate_room_full passed")
 

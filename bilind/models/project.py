@@ -57,6 +57,7 @@ class Project:
     plaster_waste_percentage: float = 5.0    # Waste % for plaster
     paint_waste_percentage: float = 10.0     # Waste % for paint
     tiles_waste_percentage: float = 15.0     # Waste % for tiles
+    plaster_under_ceramic: bool = True       # Does plaster continue behind ceramic? (True = Yes)
     
     # Decimal precision controls (separate for each measurement type)
     decimal_precision: int = 2               # General/legacy precision (for backward compatibility)
@@ -64,6 +65,9 @@ class Project:
     decimal_precision_length: int = 2        # Precision for length measurements (m)
     decimal_precision_weight: int = 1        # Precision for weight measurements (kg)
     decimal_precision_cost: int = 2          # Precision for cost/currency values
+
+    # Display formatting
+    use_thousands_separator: bool = False    # 1,234.56 grouping in UI
     
     def to_dict(self) -> Dict[str, Any]:
         """Converts the project and its contents to a dictionary for JSON serialization."""
@@ -77,11 +81,13 @@ class Project:
             "plaster_waste_percentage": self.plaster_waste_percentage,
             "paint_waste_percentage": self.paint_waste_percentage,
             "tiles_waste_percentage": self.tiles_waste_percentage,
+            "plaster_under_ceramic": self.plaster_under_ceramic,
             "decimal_precision": self.decimal_precision,
             "decimal_precision_area": self.decimal_precision_area,
             "decimal_precision_length": self.decimal_precision_length,
             "decimal_precision_weight": self.decimal_precision_weight,
             "decimal_precision_cost": self.decimal_precision_cost,
+            "use_thousands_separator": self.use_thousands_separator,
             "rooms": [r.to_dict() if hasattr(r, 'to_dict') else r for r in self.rooms],
             "doors": [o.to_dict() if hasattr(o, 'to_dict') else o for o in self.doors],
             "windows": [w.to_dict() if hasattr(w, 'to_dict') else w for w in self.windows],
@@ -109,11 +115,13 @@ class Project:
             plaster_waste_percentage=data.get("plaster_waste_percentage", 5.0),
             paint_waste_percentage=data.get("paint_waste_percentage", 10.0),
             tiles_waste_percentage=data.get("tiles_waste_percentage", 15.0),
+            plaster_under_ceramic=data.get("plaster_under_ceramic", True),
             decimal_precision=data.get("decimal_precision", 2),
             decimal_precision_area=data.get("decimal_precision_area", 2),
             decimal_precision_length=data.get("decimal_precision_length", 2),
             decimal_precision_weight=data.get("decimal_precision_weight", 1),
             decimal_precision_cost=data.get("decimal_precision_cost", 2),
+            use_thousands_separator=data.get("use_thousands_separator", False),
             rooms=[Room.from_dict(r) for r in data.get("rooms", [])],
             doors=[Opening.from_dict(o) for o in data.get("doors", [])],
             windows=[Opening.from_dict(w) for w in data.get("windows", [])],

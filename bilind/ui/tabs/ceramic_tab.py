@@ -8,14 +8,14 @@ Merges functionality from the old Materials Tab and Tiles section.
 import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 from .base_tab import BaseTab
 from ...models.finish import CeramicZone
 from ..dialogs.item_selector_dialog import ItemSelectorDialog
 
 if TYPE_CHECKING:
-    from ...bilind_main import BilindEnhanced
+    from bilind_main import BilindEnhanced
 
 
 class CeramicTab(BaseTab):
@@ -100,6 +100,10 @@ class CeramicTab(BaseTab):
         btn_bar2.pack(fill=tk.X, pady=(0, 10))
 
         for text, command, style in [
+            ("🚿 حمام كامل", self.preset_bathroom_full, 'Accent.TButton'),
+            ("🚽 تواليت...", self.preset_toilet, 'Secondary.TButton'),
+            ("🍳 مطبخ...", self.preset_kitchen, 'Secondary.TButton'),
+            ("🪟 بلكون...", self.preset_balcony, 'Secondary.TButton'),
             ("⚡ سيراميك سريع", self.quick_ceramic_wizard, 'Success.TButton'),
             ("➕ Add Zone", self.add_ceramic_zone, 'Accent.TButton'),
             ("✏️ Edit", self.edit_ceramic_zone, 'Secondary.TButton'),
@@ -135,6 +139,310 @@ class CeramicTab(BaseTab):
         
         self.ceramic_totals_label = ttk.Label(frame, text="No zones defined", style='Metrics.TLabel')
         self.ceramic_totals_label.pack(anchor=tk.W, pady=(8, 0))
+
+    # --- Presets ---
+    def _classify_rooms(self):
+        """Return mapping of rtype -> list of rooms."""
+        try:
+            from bilind.ui.tabs.helpers.auto_presets import classify_room_type
+        except Exception:
+            classify_room_type = None
+
+        by_type = {'kitchen': [], 'bath': [], 'toilet': [], 'balcony': []}
+        for room in (self.app.project.rooms or []):
+            rname = getattr(room, 'name', None) if not isinstance(room, dict) else room.get('name')
+            rname = str(rname or '')
+            if classify_room_type:
+                rtype = classify_room_type(rname, room)
+            else:
+                low = rname.lower()
+                if 'مطبخ' in rname or 'kitchen' in low:
+                    rtype = 'kitchen'
+                elif 'تواليت' in rname or 'wc' in low or 'toilet' in low:
+                    rtype = 'toilet'
+                elif 'حمام' in rname or 'bath' in low:
+                    rtype = 'bath'
+                elif 'بلكون' in rname or 'شرفة' in rname or 'balcony' in low:
+                    rtype = 'balcony'
+                else:
+                    rtype = ''
+
+            if rtype in by_type:
+                by_type[rtype].append(room)
+        return by_type
+
+    def _room_name(self, room) -> str:
+        return str(getattr(room, 'name', '') if not isinstance(room, dict) else room.get('name', '') or '')
+
+    def _room_area(self, room) -> float:
+        try:
+            return float(getattr(room, 'area', 0.0) if not isinstance(room, dict) else room.get('area', 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _room_wall_height(self, room) -> float:
+        try:
+            h = getattr(room, 'wall_height', None) if not isinstance(room, dict) else room.get('wall_height', None)
+            if h is None:
+                h = getattr(self.app.project, 'default_wall_height', 3.0)
+            return float(h or 3.0)
+        except Exception:
+            return float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+
+    def _iter_room_walls(self, room):
+        walls = getattr(room, 'walls', None) if not isinstance(room, dict) else room.get('walls')
+        return list(walls or [])
+
+    def _wall_name(self, wall, idx: int) -> str:
+        return str(getattr(wall, 'name', '') if not isinstance(wall, dict) else wall.get('name', '') or f"Wall {idx+1}")
+
+    def _wall_length(self, wall) -> float:
+        try:
+            return float(getattr(wall, 'length', 0.0) if not isinstance(wall, dict) else wall.get('length', 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _delete_room_zones(self, room_name: str, surfaces: set[str]) -> None:
+        zones = self.app.project.ceramic_zones or []
+        kept = []
+        for z in zones:
+            z_room = z.get('room_name') if isinstance(z, dict) else getattr(z, 'room_name', '')
+            z_surface = z.get('surface_type', 'wall') if isinstance(z, dict) else getattr(z, 'surface_type', 'wall')
+            if str(z_room or '') == str(room_name) and str(z_surface or 'wall') in surfaces:
+                continue
+            kept.append(z)
+        self.app.project.ceramic_zones = kept
+
+    def _set_wall_ceramic_fields(self, room, height: float) -> None:
+        walls = self._iter_room_walls(room)
+        for w in walls:
+            ln = self._wall_length(w)
+            area = ln * height
+            if isinstance(w, dict):
+                w['ceramic_height'] = height
+                w['ceramic_area'] = area
+                w['ceramic_surface'] = 'سيراميك'
+            else:
+                setattr(w, 'ceramic_height', height)
+                setattr(w, 'ceramic_area', area)
+                setattr(w, 'ceramic_surface', 'سيراميك')
+
+    def _add_wall_zones_for_room(self, room, height: float, category: str, label: str) -> int:
+        from bilind.models.finish import CeramicZone
+        room_name = self._room_name(room)
+        walls = self._iter_room_walls(room)
+        created = 0
+
+        if walls:
+            self._set_wall_ceramic_fields(room, height)
+            for i, w in enumerate(walls):
+                ln = self._wall_length(w)
+                if ln <= 0:
+                    continue
+                wname = self._wall_name(w, i)
+                self.app.project.ceramic_zones.append(
+                    CeramicZone(
+                        name=f"{label} - {room_name} - جدار {i+1}",
+                        category=category,
+                        perimeter=ln,
+                        height=float(height),
+                        surface_type='wall',
+                        room_name=room_name,
+                        wall_name=wname,
+                    )
+                )
+                created += 1
+            return created
+
+        # Fallback: room has no explicit walls, create one whole-room wall zone
+        perim = getattr(room, 'perimeter', None) if not isinstance(room, dict) else room.get('perimeter', None)
+        if perim is None:
+            perim = getattr(room, 'perim', 0.0) if not isinstance(room, dict) else room.get('perim', 0.0)
+        try:
+            perim = float(perim or 0.0)
+        except Exception:
+            perim = 0.0
+        if perim > 0:
+            self.app.project.ceramic_zones.append(
+                CeramicZone.for_wall(
+                    perimeter=perim,
+                    height=float(height),
+                    room_name=room_name,
+                    category=category,
+                    name=f"{label} - {room_name}",
+                )
+            )
+            created += 1
+        return created
+
+    def _add_floor_and_ceiling_for_room(self, room, category: str, label: str) -> int:
+        from bilind.models.finish import CeramicZone
+        room_name = self._room_name(room)
+        area = self._room_area(room)
+        if area <= 0:
+            return 0
+        z_floor = CeramicZone.for_floor(area=area, room_name=room_name, category=category, name=f"{label} أرضية - {room_name}")
+        z_ceil = CeramicZone.for_floor(area=area, room_name=room_name, category=category, name=f"{label} سقف - {room_name}")
+        z_ceil.surface_type = 'ceiling'
+        self.app.project.ceramic_zones.extend([z_floor, z_ceil])
+        return 2
+
+    def _finalize_preset(self, affected_rooms: list) -> None:
+        for room in affected_rooms:
+            try:
+                if hasattr(self.app, '_recompute_room_finish'):
+                    self.app._recompute_room_finish(room)
+            except Exception:
+                pass
+        try:
+            if hasattr(self.app, 'refresh_rooms'):
+                self.app.refresh_rooms()
+        except Exception:
+            pass
+        self.refresh_data()
+        self.notify_data_changed()
+
+    def preset_bathroom_full(self):
+        """Bathrooms: walls full height + floor + ceiling."""
+        by_type = self._classify_rooms()
+        rooms = by_type.get('bath', [])
+        if not rooms:
+            messagebox.showinfo("Info", "لا يوجد حمامات.")
+            return
+        names = ', '.join(self._room_name(r) for r in rooms[:6])
+        if len(rooms) > 6:
+            names += f" ... (+{len(rooms)-6})"
+        if not messagebox.askyesno("تأكيد", f"تطبيق حمام كامل (جدران+أرض+سقف) على {len(rooms)} حمام؟\n\n{names}"):
+            return
+
+        affected = []
+        for room in rooms:
+            rname = self._room_name(room)
+            self._delete_room_zones(rname, {'wall', 'floor', 'ceiling'})
+            h = self._room_wall_height(room)
+            self._add_wall_zones_for_room(room, h, category='Bathroom', label='حمام')
+            self._add_floor_and_ceiling_for_room(room, category='Bathroom', label='حمام')
+            affected.append(room)
+
+        self._finalize_preset(affected)
+        self.app.update_status(f"✅ حمام كامل: تم تطبيقه على {len(affected)} حمام", icon="🚿")
+
+    def preset_toilet(self):
+        """Toilets: full (walls+floor+ceiling) OR walls-only with a chosen height."""
+        by_type = self._classify_rooms()
+        rooms = by_type.get('toilet', [])
+        if not rooms:
+            messagebox.showinfo("Info", "لا يوجد تواليت.")
+            return
+
+        full = messagebox.askyesno("تواليت", "هل تريد تواليت كامل (جدران + أرض + سقف)؟\n\nYES = كامل\nNO = جدران فقط")
+        height = None
+        if not full:
+            height = simpledialog.askfloat("تواليت - ارتفاع الجدران", "أدخل ارتفاع سيراميك الجدران (م):", initialvalue=1.6, minvalue=0.1)
+            if height is None:
+                return
+
+        names = ', '.join(self._room_name(r) for r in rooms[:6])
+        if len(rooms) > 6:
+            names += f" ... (+{len(rooms)-6})"
+        title = "تواليت كامل" if full else f"تواليت جدران فقط ({height:.2f}م)"
+        if not messagebox.askyesno("تأكيد", f"{title} على {len(rooms)} تواليت؟\n\n{names}"):
+            return
+
+        affected = []
+        for room in rooms:
+            rname = self._room_name(room)
+            if full:
+                self._delete_room_zones(rname, {'wall', 'floor', 'ceiling'})
+                h = self._room_wall_height(room)
+                self._add_wall_zones_for_room(room, h, category='Toilet', label='تواليت')
+                self._add_floor_and_ceiling_for_room(room, category='Toilet', label='تواليت')
+            else:
+                self._delete_room_zones(rname, {'wall'})
+                self._add_wall_zones_for_room(room, float(height), category='Toilet', label='تواليت')
+            affected.append(room)
+
+        self._finalize_preset(affected)
+        self.app.update_status(f"✅ {title}: تم تطبيقه على {len(affected)} تواليت", icon="🚽")
+
+    def preset_kitchen(self):
+        """Kitchens: walls-only with a chosen height (default 1.6m)."""
+        by_type = self._classify_rooms()
+        rooms = by_type.get('kitchen', [])
+        if not rooms:
+            messagebox.showinfo("Info", "لا يوجد مطابخ.")
+            return
+
+        height = simpledialog.askfloat("مطبخ - ارتفاع الجدران", "أدخل ارتفاع سيراميك الجدران (م):", initialvalue=1.6, minvalue=0.1)
+        if height is None:
+            return
+
+        names = ', '.join(self._room_name(r) for r in rooms[:6])
+        if len(rooms) > 6:
+            names += f" ... (+{len(rooms)-6})"
+        if not messagebox.askyesno("تأكيد", f"تطبيق مطبخ (جدران فقط) بارتفاع {height:.2f}م على {len(rooms)} مطبخ؟\n\n{names}"):
+            return
+
+        affected = []
+        for room in rooms:
+            rname = self._room_name(room)
+            self._delete_room_zones(rname, {'wall'})
+            self._add_wall_zones_for_room(room, float(height), category='Kitchen', label='مطبخ')
+            affected.append(room)
+
+        self._finalize_preset(affected)
+        self.app.update_status(f"✅ مطبخ جدران ({height:.2f}م): تم تطبيقه على {len(affected)} مطبخ", icon="🍳")
+
+    def preset_balcony(self):
+        """Balconies: walls-only with chosen height; optional floor."""
+        by_type = self._classify_rooms()
+        rooms = by_type.get('balcony', [])
+        if not rooms:
+            messagebox.showinfo("Info", "لا يوجد بلكونات/شرفات.")
+            return
+
+        height = simpledialog.askfloat(
+            "بلكون - ارتفاع الجدران",
+            "أدخل ارتفاع سيراميك جدران البلكون (م):",
+            initialvalue=1.6,
+            minvalue=0.1,
+        )
+        if height is None:
+            return
+
+        include_floor = messagebox.askyesno("بلكون", "هل تريد إضافة سيراميك أرضية للبلكون أيضاً؟")
+
+        names = ', '.join(self._room_name(r) for r in rooms[:6])
+        if len(rooms) > 6:
+            names += f" ... (+{len(rooms)-6})"
+        title = f"بلكون جدران ({height:.2f}م)" + (" + أرض" if include_floor else "")
+        if not messagebox.askyesno("تأكيد", f"تطبيق {title} على {len(rooms)} بلكون؟\n\n{names}"):
+            return
+
+        affected = []
+        for room in rooms:
+            rname = self._room_name(room)
+            surfaces = {'wall', 'floor'} if include_floor else {'wall'}
+            self._delete_room_zones(rname, surfaces)
+            self._add_wall_zones_for_room(room, float(height), category='Balcony', label='بلكون')
+
+            if include_floor:
+                area = self._room_area(room)
+                if area > 0:
+                    from bilind.models.finish import CeramicZone
+                    self.app.project.ceramic_zones.append(
+                        CeramicZone.for_floor(
+                            area=area,
+                            room_name=rname,
+                            category='Balcony',
+                            name=f"بلكون أرضية - {rname}",
+                        )
+                    )
+
+            affected.append(room)
+
+        self._finalize_preset(affected)
+        self.app.update_status(f"✅ {title}: تم تطبيقه على {len(affected)} بلكون", icon="🪟")
 
     # --- Section 2: Floor Tiling ---
     def _create_floor_tiling_section(self, parent):
