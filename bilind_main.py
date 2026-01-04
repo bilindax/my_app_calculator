@@ -3644,19 +3644,29 @@ class BilindEnhanced:
         h_var = tk.StringVar(value=f"{height_default}")
         ttk.Entry(frame, textvariable=h_var, width=12).grid(row=6, column=1, sticky='w', pady=6)
 
-        ttk.Label(frame, text="Quantity", foreground=self.colors['text_secondary']).grid(row=7, column=0, sticky='w', pady=6)
+        # Quantity (Hidden/Removed as per user request to simplify)
+        # We keep the variable for compatibility but hide the UI controls
         qty_var = tk.StringVar(value=str(qty_default))
-        ttk.Entry(frame, textvariable=qty_var, width=12).grid(row=7, column=1, sticky='w', pady=6)
-        qty_hint = ttk.Label(frame, text="For this room", foreground=self.colors['text_secondary'], font=('Segoe UI', 8))
-        qty_hint.grid(row=7, column=2, sticky='w', padx=12)
+        # ttk.Label(frame, text="Quantity", foreground=self.colors['text_secondary']).grid(row=7, column=0, sticky='w', pady=6)
+        # ttk.Entry(frame, textvariable=qty_var, width=12).grid(row=7, column=1, sticky='w', pady=6)
+        # qty_hint = ttk.Label(frame, text="For this room", foreground=self.colors['text_secondary'], font=('Segoe UI', 8))
+        # qty_hint.grid(row=7, column=2, sticky='w', padx=12)
         
         # Total Count - total across all rooms/walls
         total_count_default = defaults.get('total_count', qty_default)
-        ttk.Label(frame, text="Total Count (All Walls)", foreground=self.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=8, column=0, sticky='w', pady=6)
+        ttk.Label(frame, text="Total Quantity", foreground=self.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=8, column=0, sticky='w', pady=6)
         total_count_var = tk.StringVar(value=str(total_count_default))
         ttk.Entry(frame, textvariable=total_count_var, width=12).grid(row=8, column=1, sticky='w', pady=6)
-        total_count_hint = ttk.Label(frame, text="إجمالي في كل الجدران", foreground=self.colors['accent'], font=('Segoe UI', 8))
+        total_count_hint = ttk.Label(frame, text="الكمية الكلية", foreground=self.colors['accent'], font=('Segoe UI', 8))
         total_count_hint.grid(row=8, column=2, sticky='w', padx=12)
+        
+        # Sync qty with total_count since we are in global edit mode
+        def sync_qty(*_):
+            try:
+                qty_var.set(total_count_var.get())
+            except:
+                pass
+        total_count_var.trace_add('write', sync_qty)
         
         # Placement height (height from floor to sill)
         placement_default = defaults.get('placement_height', 1.0 if opening_type == 'WINDOW' else 0.0)
@@ -3895,14 +3905,23 @@ class BilindEnhanced:
         ttk.Label(frame, text="Height (m)", foreground=self.colors['text_secondary']).grid(row=4, column=0, sticky='w', pady=6)
         ttk.Entry(frame, textvariable=height_var, width=12).grid(row=4, column=1, sticky='w', pady=6)
 
-        ttk.Label(frame, text="Quantity", foreground=self.colors['text_secondary']).grid(row=5, column=0, sticky='w', pady=6)
-        ttk.Entry(frame, textvariable=qty_var, width=12).grid(row=5, column=1, sticky='w', pady=6)
-        ttk.Label(frame, text="For this room", foreground=self.colors['text_secondary'], font=('Segoe UI', 8)).grid(row=5, column=2, sticky='w', padx=8)
+        # Quantity (Hidden/Removed as per user request to simplify)
+        # ttk.Label(frame, text="Quantity", foreground=self.colors['text_secondary']).grid(row=5, column=0, sticky='w', pady=6)
+        # ttk.Entry(frame, textvariable=qty_var, width=12).grid(row=5, column=1, sticky='w', pady=6)
+        # ttk.Label(frame, text="For this room", foreground=self.colors['text_secondary'], font=('Segoe UI', 8)).grid(row=5, column=2, sticky='w', padx=8)
 
         # Total Count field
-        ttk.Label(frame, text="Total Count (All Walls)", foreground=self.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=6, column=0, sticky='w', pady=6)
+        ttk.Label(frame, text="Total Quantity", foreground=self.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=6, column=0, sticky='w', pady=6)
         ttk.Entry(frame, textvariable=total_count_var, width=12).grid(row=6, column=1, sticky='w', pady=6)
-        ttk.Label(frame, text="إجمالي في كل الجدران", foreground=self.colors['accent'], font=('Segoe UI', 8)).grid(row=6, column=2, sticky='w', padx=8)
+        ttk.Label(frame, text="الكمية الكلية", foreground=self.colors['accent'], font=('Segoe UI', 8)).grid(row=6, column=2, sticky='w', padx=8)
+        
+        # Sync qty with total_count since we are in global edit mode
+        def sync_qty(*_):
+            try:
+                qty_var.set(total_count_var.get())
+            except:
+                pass
+        total_count_var.trace_add('write', sync_qty)
 
         # Placement height
         placement_height = opening_dict.get('placement_height', 1.0 if opening_type == 'WINDOW' else 0.0)

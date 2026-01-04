@@ -1996,12 +1996,12 @@ class RoomManagerTab:
             command=self._auto_update_all_rooms
         ).pack(fill=tk.X)
         
-        # Total Counter
+        # Total Counter (for THIS room only)
         total_frame = ttk.Frame(openings_frame, style='Main.TFrame')
         total_frame.pack(fill=tk.X, pady=(8,4))
         self.openings_total_label = ttk.Label(
             total_frame, 
-            text="📊 الإجمالي: 0 أبواب | 0 نوافذ", 
+            text="📊 الإجمالي في هذه الغرفة: 0 أبواب | 0 نوافذ", 
             foreground=self.app.colors['accent'],
             font=('Segoe UI', 9, 'bold')
         )
@@ -2602,7 +2602,7 @@ class RoomManagerTab:
                 except (ValueError, IndexError):
                     pass
             
-            self.openings_total_label.config(text=f"📊 الإجمالي: {d_count} أبواب | {w_count} نوافذ")
+            self.openings_total_label.config(text=f"📊 الإجمالي في هذه الغرفة: {d_count} أبواب | {w_count} نوافذ")
 
         # Recalculate ceramic with opening deductions (reactive)
         try:
@@ -3336,10 +3336,16 @@ class RoomManagerTab:
         opening_dict = self.app._opening_to_dict(opening_obj)
         type_catalog = self.app.door_types if opening_type == 'DOOR' else self.app.window_types
         
-        # Get room-specific quantity
+        # Room context (may be absent if user is editing openings as project-level data)
         room_name = self.app._room_name(self.selected_room) if self.selected_room else ''
+        has_room_context = bool(room_name)
+
+        # Quantity: room-specific when room selected; otherwise project total
         room_qtys = opening_dict.get('room_quantities', {}) or {}
-        room_qty = room_qtys.get(room_name, 1)
+        if has_room_context:
+            room_qty = room_qtys.get(room_name, 1)
+        else:
+            room_qty = int(opening_dict.get('quantity', opening_dict.get('qty', 1)) or 1)
         
         # Create edit dialog
         dialog = tk.Toplevel(self.frame)
@@ -3387,8 +3393,8 @@ class RoomManagerTab:
         ttk.Entry(frame, textvariable=height_var, width=12).grid(row=row, column=1, sticky='w', pady=6)
         
         row += 1
-        # Room-specific quantity with room name label
-        ttk.Label(frame, text=f"العدد في '{room_name}':", foreground=self.app.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=row, column=0, sticky='w', pady=6)
+        qty_label = "الكمية (في هذه الغرفة):" if has_room_context else "الكمية (إجمالي المشروع):"
+        ttk.Label(frame, text=qty_label, foreground=self.app.colors['accent'], font=('Segoe UI', 9, 'bold')).grid(row=row, column=0, sticky='w', pady=6)
         ttk.Entry(frame, textvariable=room_qty_var, width=12).grid(row=row, column=1, sticky='w', pady=6)
         
         row += 1
@@ -3412,7 +3418,10 @@ class RoomManagerTab:
                 h = float(height_var.get())
                 qty = max(1, int(room_qty_var.get()))
                 area_total = w * h * qty
-                preview_var.set(f"📐 المساحة في هذه الغرفة: {area_total:.2f} م²")
+                if has_room_context:
+                    preview_var.set(f"📐 المساحة في هذه الغرفة: {area_total:.2f} م²")
+                else:
+                    preview_var.set(f"📐 المساحة الإجمالية: {area_total:.2f} م²")
             except Exception:
                 preview_var.set("")
         
@@ -3426,7 +3435,7 @@ class RoomManagerTab:
                 layer = layer_var.get().strip() or opening_dict.get('layer', '')
                 width = float(width_var.get())
                 height = float(height_var.get())
-                new_room_qty = max(1, int(room_qty_var.get()))  # Room-specific quantity
+                new_qty = max(1, int(room_qty_var.get()))
                 placement = float(placement_var.get())
                 
                 if width <= 0 or height <= 0:
@@ -3441,10 +3450,14 @@ class RoomManagerTab:
                 if name in existing_names:
                     name = self.app._make_unique_name(opening_type, name)
                 
-                # Calculate total qty from all rooms
+                # Calculate total qty
                 existing_room_qtys = opening_dict.get('room_quantities', {}) or {}
-                existing_room_qtys[room_name] = new_room_qty  # Update this room's qty
-                total_qty = sum(existing_room_qtys.values()) if existing_room_qtys else 1
+                if has_room_context:
+                    existing_room_qtys[room_name] = new_qty  # Update this room's qty
+                    total_qty = sum(existing_room_qtys.values()) if existing_room_qtys else new_qty
+                else:
+                    # Project-level edit: do not touch per-room quantities
+                    total_qty = new_qty
                 
                 # Build new record with total qty
                 new_record = self.app._build_opening_record(
@@ -3460,46 +3473,61 @@ class RoomManagerTab:
                 
                 if isinstance(new_record, dict):
                     new_record['assigned_rooms'] = assigned
-                    new_record['room_quantities'] = existing_room_qtys  # Store per-room quantities
+                    # Store per-room quantities only when we have room context (avoid '' key confusion)
+                    if has_room_context:
+                        new_record['room_quantities'] = existing_room_qtys
                 else:
                     new_record.assigned_rooms = assigned
-                    new_record.room_quantities = existing_room_qtys
+                    if has_room_context:
+                        new_record.room_quantities = existing_room_qtys
                 
                 # Update storage
                 storage[opening_idx] = new_record
                 
-                # Re-distribute openings to walls based on new quantities
-                self._auto_distribute_openings(self.selected_room)
+                # Re-distribute openings to walls based on new quantities (room context only)
+                if self.selected_room is not None:
+                    self._auto_distribute_openings(self.selected_room)
                 
-                # Recalculate wall deductions for all walls
-                if isinstance(self.selected_room, dict):
-                    walls = self.selected_room.get('walls', []) or []
-                else:
-                    walls = getattr(self.selected_room, 'walls', []) or []
-                
-                all_openings = list(self.app.project.doors) + list(self.app.project.windows)
-                for wall_data in walls:
-                    if isinstance(wall_data, dict):
-                        from bilind.models.wall import Wall
-                        wall_obj = Wall.from_dict(wall_data)
-                        wall_obj.recalculate_deductions(all_openings)
-                        wall_data['deduct'] = wall_obj.deduction_area
-                        wall_data['net'] = wall_obj.net_area
-                        wall_data['net_area'] = wall_obj.net_area
-                        wall_data['ceramic_area'] = wall_obj.ceramic_area
+                # Recalculate wall deductions for all walls (room context only)
+                if self.selected_room is not None:
+                    if isinstance(self.selected_room, dict):
+                        walls = self.selected_room.get('walls', []) or []
                     else:
-                        wall_data.recalculate_deductions(all_openings)
+                        walls = getattr(self.selected_room, 'walls', []) or []
+
+                    all_openings = list(self.app.project.doors) + list(self.app.project.windows)
+                    for wall_data in walls:
+                        if isinstance(wall_data, dict):
+                            from bilind.models.wall import Wall
+                            wall_obj = Wall.from_dict(wall_data)
+                            wall_obj.recalculate_deductions(all_openings)
+                            wall_data['deduct'] = wall_obj.deduction_area
+                            wall_data['net'] = wall_obj.net_area
+                            wall_data['net_area'] = wall_obj.net_area
+                            wall_data['ceramic_area'] = wall_obj.ceramic_area
+                        else:
+                            wall_data.recalculate_deductions(all_openings)
                 
                 # Refresh displays including walls tree and visuals
                 self.app.refresh_openings()
                 self._refresh_openings_trees()
-                self._refresh_walls_tree()  # Refresh walls to show updated openings
-                self._render_room_visuals(self.selected_room)  # Update the drawing
-                self.refresh_rooms_list()  # Update the rooms list to reflect qty changes
+                if self.selected_room is not None:
+                    self._refresh_walls_tree()  # Refresh walls to show updated openings
+                    self._render_room_visuals(self.selected_room)  # Update the drawing
+                    self.refresh_rooms_list()  # Update the rooms list to reflect qty changes
                 
                 dialog.destroy()
                 icon = "🚪" if opening_type == 'DOOR' else "🪟"
-                self.app.update_status(f"✅ تم تحديث {'الباب' if opening_type == 'DOOR' else 'النافذة'} '{name}' (العدد في {room_name}: {new_room_qty})", icon=icon)
+                if has_room_context:
+                    self.app.update_status(
+                        f"✅ تم تحديث {'الباب' if opening_type == 'DOOR' else 'النافذة'} '{name}' (الكمية في {room_name}: {new_qty})",
+                        icon=icon,
+                    )
+                else:
+                    self.app.update_status(
+                        f"✅ تم تحديث {'الباب' if opening_type == 'DOOR' else 'النافذة'} '{name}' (الكمية الإجمالية: {new_qty})",
+                        icon=icon,
+                    )
                 
             except ValueError as exc:
                 messagebox.showerror("خطأ", f"خطأ: {exc}")

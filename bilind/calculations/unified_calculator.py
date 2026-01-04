@@ -46,6 +46,15 @@ class RoomCalculations:
     stone_length: float = 0.0
 
 
+@dataclass
+class ZoneMetrics:
+    """نتائج حسابات منطقة سيراميك واحدة (Zone)."""
+    gross_area: float
+    net_area: float
+    deduction_area: float
+    deduction_details: str
+
+
 class UnifiedCalculator:
     def __init__(self, project: Any):
         self.project = project
@@ -256,6 +265,158 @@ class UnifiedCalculator:
             
         self._ceramic_by_room_cache = result
         return result
+
+    def calculate_zone_metrics(self, zone: Any) -> ZoneMetrics:
+        """SSOT: calculate one ceramic zone gross/net and deduction audit."""
+
+        def _wall_number(name: str) -> Optional[int]:
+            try:
+                m = re.search(r"(\d+)", str(name or ""))
+                return int(m.group(1)) if m else None
+            except Exception:
+                return None
+
+        def _walls_match(a: str, b: str) -> bool:
+            a = str(a or "").strip()
+            b = str(b or "").strip()
+            if not a or not b:
+                return False
+            if a == b:
+                return True
+            na = _wall_number(a)
+            nb = _wall_number(b)
+            return (na is not None) and (nb is not None) and (na == nb)
+
+        room_name = str(self._get_attr(zone, 'room_name', '') or '').strip()
+        surface_type = str(self._get_attr(zone, 'surface_type', 'wall') or 'wall').strip()
+        room_obj = self.rooms_map.get(room_name) if room_name else None
+
+        # Manual override: effective_area on wall zones is authoritative.
+        if surface_type == 'wall':
+            try:
+                eff = float(self._get_attr(zone, 'effective_area', 0.0) or 0.0)
+            except Exception:
+                eff = 0.0
+            if eff > 0:
+                return ZoneMetrics(
+                    gross_area=eff,
+                    net_area=eff,
+                    deduction_area=0.0,
+                    deduction_details='Effective Area (Manual override)',
+                )
+
+        # Orphan filtering (match calculate_ceramic_by_room behavior)
+        if surface_type == 'wall' and room_obj:
+            z_wall = str(self._get_attr(zone, 'wall_name', '') or '').strip()
+            if z_wall:
+                valid_walls = set()
+                walls = self._get_attr(room_obj, 'walls', []) or []
+                for i, w in enumerate(walls):
+                    w_name = self._get_attr(w, 'name', f'Wall {i+1}')
+                    valid_walls.add((room_name, w_name))
+                    num_match = re.search(r'(\d+)', str(w_name or ''))
+                    if num_match:
+                        num = num_match.group(1)
+                        valid_walls.add((room_name, f"Wall {num}"))
+                        valid_walls.add((room_name, f"جدار {num}"))
+
+                if (room_name, z_wall) not in valid_walls:
+                    z_name = str(self._get_attr(zone, 'name', '') or '')
+                    num_match = re.search(r'(?:جدار|Wall)\s*(\d+)', z_name, re.IGNORECASE)
+                    if num_match:
+                        wall_num = num_match.group(1)
+                        if (room_name, f"جدار {wall_num}") not in valid_walls and (room_name, f"Wall {wall_num}") not in valid_walls:
+                            return ZoneMetrics(0.0, 0.0, 0.0, 'Orphan zone (wall deleted)')
+                    else:
+                        return ZoneMetrics(0.0, 0.0, 0.0, 'Orphan zone (wall deleted)')
+
+        # Area-based zones (floor/ceiling): no opening deductions.
+        if surface_type in ('floor', 'ceiling'):
+            zone_area = float(self._get_attr(zone, 'effective_area', 0.0) or 0.0)
+            if zone_area <= 0:
+                zone_area = float(self._get_attr(zone, 'area', 0.0) or 0.0)
+            if zone_area <= 0:
+                z_perim = float(self._get_attr(zone, 'perimeter', 0.0) or 0.0)
+                z_height = float(self._get_attr(zone, 'height', 0.0) or 0.0)
+                zone_area = z_perim * z_height
+            if zone_area <= 0.01 and room_obj:
+                zone_area = float(self._get_attr(room_obj, 'area', 0.0) or 0.0)
+            return ZoneMetrics(
+                gross_area=zone_area,
+                net_area=zone_area,
+                deduction_area=0.0,
+                deduction_details='لا يوجد خصم',
+            )
+
+        # Wall zone geometry
+        height = float(self._get_attr(zone, 'height', 0.0) or 0.0)
+        perim = float(self._get_attr(zone, 'perimeter', 0.0) or 0.0)
+        if perim <= 0.001 and room_obj:
+            perim = self._resolve_zone_geometry(zone, room_obj)
+        gross_area = perim * height
+
+        deduction = 0.0
+        details_list: List[str] = []
+        if room_obj:
+            z_start = float(self._get_attr(zone, 'start_height', 0.0) or 0.0)
+            z_end = z_start + height
+            zone_wall_name = str(self._get_attr(zone, 'wall_name', '') or '').strip()
+            room_perim = self._get_perimeter(room_obj)
+
+            for op_id in (self._get_attr(room_obj, 'opening_ids', []) or []):
+                opening = self.openings_map.get(op_id)
+                if not opening:
+                    continue
+
+                opening_host_wall = str(self._get_attr(opening, 'host_wall', '') or '').strip()
+                if zone_wall_name and opening_host_wall and not _walls_match(zone_wall_name, opening_host_wall):
+                    continue
+
+                ow = self._get_opening_width(opening)
+                oh = self._get_opening_height(opening)
+                otyp = str(self._get_attr(opening, 'opening_type', '')).upper()
+                def_pl = 1.0 if otyp == 'WINDOW' else 0.0
+                place = float(self._get_attr(opening, 'placement_height', def_pl) or def_pl)
+
+                op_top = place + oh
+                ov_start = max(z_start, place)
+                ov_end = min(z_end, op_top)
+                overlap_h = max(0.0, ov_end - ov_start)
+                if overlap_h <= 0:
+                    continue
+
+                qtys = self._get_attr(opening, 'room_quantities', {}) or {}
+                q = int(qtys.get(room_name, 1))
+                piece = (ow * overlap_h * q)
+
+                ratio_note = ''
+                if not (zone_wall_name and opening_host_wall) and room_perim > 0 and perim < room_perim * 0.95:
+                    ratio = perim / room_perim
+                    piece *= ratio
+                    ratio_note = f" (نسبة {int(ratio * 100)}%)"
+
+                if piece > 0.0001:
+                    deduction += piece
+                    o_name = str(self._get_attr(opening, 'name', op_id) or op_id)
+                    details_list.append(f"{o_name}: -{piece:.2f}م²{ratio_note}")
+
+        net = max(0.0, gross_area - deduction)
+
+        # Keep the same QA cap used by calculate_ceramic_by_room
+        if room_obj:
+            room_walls_gross = self.calculate_walls_gross(room_obj)
+            room_openings = self.calculate_openings_deduction(room_obj, exclude_ceramic_overlap=False)
+            max_available = max(0.0, room_walls_gross - room_openings)
+            if net > max_available:
+                net = max_available
+
+        details_str = " | ".join(details_list) if details_list else 'لا يوجد خصم'
+        return ZoneMetrics(
+            gross_area=float(gross_area or 0.0),
+            net_area=float(net or 0.0),
+            deduction_area=float(deduction or 0.0),
+            deduction_details=details_str,
+        )
 
     def calculate_room(self, room: Any) -> RoomCalculations:
         room_name = self._get_attr(room, 'name', '')
