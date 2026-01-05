@@ -1184,7 +1184,20 @@ class RoomsTab(BaseTab):
         room_name = room.get('name') if isinstance(room, dict) else getattr(room, 'name', '')
         room_type = room.get('room_type') if isinstance(room, dict) else getattr(room, 'room_type', '')
         room_area = float(room.get('area', 0) if isinstance(room, dict) else getattr(room, 'area', 0) or 0)
-        room_perim = float(room.get('perim', 0) if isinstance(room, dict) else getattr(room, 'perimeter', 0) or 0)
+
+        # Perimeter key is inconsistent across legacy dicts/objects: prefer `perim`, fallback to `perimeter`.
+        if isinstance(room, dict):
+            room_perim_raw = room.get('perim', None)
+            if room_perim_raw is None:
+                room_perim_raw = room.get('perimeter', 0)
+        else:
+            room_perim_raw = getattr(room, 'perim', None)
+            if room_perim_raw is None:
+                room_perim_raw = getattr(room, 'perimeter', 0)
+        try:
+            room_perim = float(room_perim_raw or 0.0)
+        except Exception:
+            room_perim = 0.0
         
         # Get defaults for this room type
         from bilind.core.config import get_room_defaults
@@ -1204,6 +1217,25 @@ class RoomsTab(BaseTab):
         wall_h = ceramic_config.get('wall_height', 0)
         floor_ceramic = ceramic_config.get('floor', False)
         category = ceramic_config.get('category', 'Other')
+
+        # Bathrooms/toilets: users expect "full-wall" ceramic by default.
+        # Override the default 1.6m band with the room's effective wall height.
+        if str(room_type or '').strip() in ('حمام', 'تواليت') and room_perim > 0:
+            try:
+                from bilind.calculations.unified_calculator import UnifiedCalculator
+                calc = UnifiedCalculator(self.app.project)
+                walls_gross = float(calc.calculate_walls_gross(room) or 0.0)
+                if walls_gross > 0:
+                    wall_h = max(float(wall_h or 0.0), walls_gross / room_perim)
+            except Exception:
+                # Fallback to room field if calculator isn't available
+                try:
+                    if isinstance(room, dict):
+                        wall_h = max(float(wall_h or 0.0), float(room.get('wall_height', 0.0) or 0.0))
+                    else:
+                        wall_h = max(float(wall_h or 0.0), float(getattr(room, 'wall_height', 0.0) or 0.0))
+                except Exception:
+                    pass
         
         # Wall ceramic
         if wall_h > 0 and room_perim > 0:
@@ -1229,10 +1261,25 @@ class RoomsTab(BaseTab):
         if zones_to_add:
             # Show confirmation
             from tkinter import messagebox
-            msg = f"سيتم إنشاء السيراميك التالي للغرفة '{room_name}':\n\n"
+            from bilind.calculations.unified_calculator import UnifiedCalculator
+            calc = UnifiedCalculator(self.app.project)
+
+            msg = f"سيتم إنشاء السيراميك التالي للغرفة '{room_name}' (مع خصم الفتحات تلقائياً):\n\n"
+            total_net = 0.0
             for z in zones_to_add:
-                msg += f"• {z.name}: {z.area:.1f} م²\n"
-            msg += f"\nالإجمالي: {sum(z.area for z in zones_to_add):.1f} م²"
+                surface_type = (getattr(z, 'surface_type', '') or '').lower()
+                if surface_type == 'wall':
+                    m = calc.calculate_zone_metrics(z)
+                    total_net += float(m.net_area or 0.0)
+                    if (m.deduction_area or 0.0) > 0.0001:
+                        msg += f"• {z.name}: {m.net_area:.2f} م² (خصم فتحات {m.deduction_area:.2f})\n"
+                    else:
+                        msg += f"• {z.name}: {m.net_area:.2f} م²\n"
+                else:
+                    a = float(getattr(z, 'area', 0.0) or 0.0)
+                    total_net += a
+                    msg += f"• {z.name}: {a:.2f} م²\n"
+            msg += f"\nالإجمالي: {total_net:.2f} م²"
             
             if messagebox.askyesno("سيراميك سريع", msg):
                 # Delete existing ceramics for this room first

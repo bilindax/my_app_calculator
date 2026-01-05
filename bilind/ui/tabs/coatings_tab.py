@@ -48,6 +48,7 @@ class CoatingsTab(BaseTab):
         toolbar = ttk.Frame(container, style='Main.TFrame', padding=(16, 0, 16, 8))
         toolbar.pack(fill=tk.X)
         self.create_button(toolbar, "🔄 Auto-Calc All Rooms", self.auto_calculate_all, 'Accent.TButton').pack(side=tk.LEFT)
+        self.create_button(toolbar, "📘 دفتر الدهان التفصيلي", self.show_paint_breakdown, 'Secondary.TButton').pack(side=tk.LEFT, padx=8)
         ttk.Label(toolbar, text=" (Replaces all items with auto-calculated values based on current Room/Ceramic data)", style='Caption.TLabel').pack(side=tk.LEFT, padx=8)
         
         # Scrollable area
@@ -221,6 +222,92 @@ class CoatingsTab(BaseTab):
         self.refresh_data()
         self.notify_data_changed()
         self.app.update_status("Auto-calculated coatings for all rooms using UnifiedCalculator.", icon="✅")
+
+    def show_paint_breakdown(self):
+        """Show a practical per-room paint breakdown (gross/openings/ceramic/net) using SSOT."""
+        if not self.app.project.rooms:
+            messagebox.showwarning("No Rooms", "لا يوجد غرف لعرض دفتر الدهان.")
+            return
+
+        from ...calculations.unified_calculator import UnifiedCalculator
+        calc = UnifiedCalculator(self.app.project)
+        room_calcs = calc.calculate_all_rooms()
+
+        dlg = tk.Toplevel(self.app.root)
+        dlg.title("📘 دفتر الدهان التفصيلي")
+        dlg.configure(bg=self.app.colors['bg_secondary'])
+        dlg.transient(self.app.root)
+        dlg.grab_set()
+        dlg.geometry("980x560")
+
+        container = ttk.Frame(dlg, padding=(14, 12), style='Main.TFrame')
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text="تفصيل عملي لكل غرفة: إجمالي الجدران → خصم الفتحات → خصم السيراميك → صافي الدهان.",
+            style='Caption.TLabel',
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        cols = ('Room', 'WallsGross', 'Openings', 'WallsNet', 'CeramicWall', 'PaintWalls', 'PaintCeil', 'PaintTotal')
+        tree = ttk.Treeview(container, columns=cols, show='headings', height=14)
+        tree.heading('Room', text='Room')
+        tree.heading('WallsGross', text='Walls Gross')
+        tree.heading('Openings', text='Openings')
+        tree.heading('WallsNet', text='Walls Net')
+        tree.heading('CeramicWall', text='Ceramic Wall')
+        tree.heading('PaintWalls', text='Paint Walls Net')
+        tree.heading('PaintCeil', text='Paint Ceiling')
+        tree.heading('PaintTotal', text='Paint Total')
+
+        tree.column('Room', width=220)
+        for c in ('WallsGross', 'Openings', 'WallsNet', 'CeramicWall', 'PaintWalls', 'PaintCeil', 'PaintTotal'):
+            tree.column(c, width=110, anchor=tk.CENTER)
+
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        tot_g = tot_o = tot_net = tot_cer = tot_pw = tot_pc = tot_pt = 0.0
+        for rc in room_calcs:
+            wg = float(rc.walls_gross or 0.0)
+            op = float(rc.walls_openings or 0.0)
+            wn = float(rc.walls_net or 0.0)
+            cw = float(rc.ceramic_wall or 0.0)
+            pw = float(rc.paint_walls or 0.0)
+            pc = float(rc.paint_ceiling or 0.0)
+            pt = float(rc.paint_total or 0.0)
+
+            tot_g += wg
+            tot_o += op
+            tot_net += wn
+            tot_cer += cw
+            tot_pw += pw
+            tot_pc += pc
+            tot_pt += pt
+
+            tree.insert('', tk.END, values=(
+                rc.room_name,
+                f"{wg:.2f}",
+                f"{op:.2f}",
+                f"{wn:.2f}",
+                f"{cw:.2f}",
+                f"{pw:.2f}",
+                f"{pc:.2f}",
+                f"{pt:.2f}",
+            ))
+
+        footer = ttk.Frame(container, style='Main.TFrame')
+        footer.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(
+            footer,
+            text=(
+                f"Totals (m²)  Gross {tot_g:.2f} | Openings {tot_o:.2f} | Net {tot_net:.2f} | "
+                f"Ceramic {tot_cer:.2f} | Paint Walls {tot_pw:.2f} | Paint Ceiling {tot_pc:.2f} | Paint Total {tot_pt:.2f}"
+            ),
+            style='Metrics.TLabel',
+            foreground=self.app.colors.get('accent', '#00d4ff'),
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(footer, text="إغلاق", command=dlg.destroy, style='Secondary.TButton').pack(side=tk.RIGHT)
 
     def add_ceilings(self, key):
         # Add room ceilings from SSOT (UnifiedCalculator)

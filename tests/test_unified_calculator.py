@@ -119,10 +119,10 @@ def test_plaster_calculation():
     
     project.rooms.append(room)
     project.doors.append(door)
-    
+
     calc = UnifiedCalculator(project)
     plaster = calc.calculate_plaster(room)
-    
+
     # Expected walls_net: (18 × 3) - (1 × 2) = 54 - 2 = 52
     # Expected ceiling: 20
     # Expected total: 52 + 20 = 72
@@ -130,6 +130,37 @@ def test_plaster_calculation():
     assert plaster['ceiling'] == 20.0, f"Expected ceiling 20.0, got {plaster['ceiling']}"
     assert abs(plaster['total'] - 72.0) < 0.01, f"Expected total 72.0, got {plaster['total']}"
     print("✅ test_plaster_calculation passed")
+
+
+def test_physical_openings_data_prefers_room_quantities_and_qty():
+    """Physical totals should use sum(room_quantities) when present and fallback to qty/quantity."""
+    project = Project(project_name="Test")
+
+    # Door with per-room quantity override
+    door = Opening(
+        name="D1",
+        opening_type="DOOR",
+        width=1.0,
+        height=2.0,
+        quantity=3,
+        room_quantities={"Corridor": 6}
+    )
+    project.doors.append(door)
+
+    # Window represented as legacy dict with qty only
+    project.windows.append({
+        "name": "W1",
+        "opening_type": "WINDOW",
+        "w": 1.5,
+        "h": 1.2,
+        "qty": 2,
+    })
+
+    calc = UnifiedCalculator(project)
+    data = calc.get_physical_openings_data()
+    assert data["doors_count"] == 6
+    assert data["windows_count"] == 2
+    assert data["total_count"] == 8
 
 
 def test_paint_with_ceramic():

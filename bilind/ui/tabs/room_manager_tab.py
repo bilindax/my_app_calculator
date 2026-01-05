@@ -330,7 +330,7 @@ class RoomManagerTab:
         helper_frame.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(helper_frame, text="ارتفاع السيراميك (م):", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
         ttk.Entry(helper_frame, textvariable=self.balcony_ceramic_height_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
-        ttk.Button(helper_frame, text="🧱 إضافة سيراميك", style='Secondary.TButton', command=self._add_balcony_ceramic_for_room).pack(side=tk.LEFT)
+        # (Removed) Wall ceramic quick buttons per user request
         
         # Save button
         row += 1
@@ -2095,14 +2095,7 @@ class RoomManagerTab:
             style='Accent.TButton'
         ).grid(row=row, column=0, columnspan=2, pady=(4, 0), sticky='ew')
         
-        # 3. Auto Add Ceramic to Walls (Kitchen/Toilet/Bath/Balcony)
-        row += 1
-        ttk.Button(
-            finishes_frame,
-            text="🧱 سيراميك جدران (مطبخ/حمام/تواليت/بلكون)",
-            command=self._auto_add_ceramic_walls_dialog,
-            style='Accent.TButton'
-        ).grid(row=row, column=0, columnspan=2, pady=(4, 0), sticky='ew')
+        # (Removed) Wall ceramic auto-add button per user request
         
         # Manual Add Ceramic
         row += 1
@@ -3563,16 +3556,28 @@ class RoomManagerTab:
             # Unassign from room
             room_name = self.app._room_name(self.selected_room)
             storage = self.app.project.doors if opening_type == 'DOOR' else self.app.project.windows
+
+            from .helpers.opening_adapter import OpeningAdapter
             
             for opening in storage:
                 if self.app._opening_name(opening) == opening_name:
-                    if isinstance(opening, dict):
-                        assigned = opening.get('assigned_rooms', [])
-                        if room_name in assigned:
-                            assigned.remove(room_name)
+                    # Important: remove both assigned_rooms and room_quantities.
+                    # Some workflows only set room_quantities, so removing assigned_rooms alone
+                    # makes the opening appear again after refresh/recalc.
+                    adapter = OpeningAdapter(opening)
+                    adapter.unassign_from_room(room_name)
+
+                    # Also remove from room_shares if present (custom split mode)
+                    if adapter.is_dict:
+                        rs = opening.get('room_shares') or {}
+                        if isinstance(rs, dict) and room_name in rs:
+                            rs.pop(room_name, None)
+                            opening['room_shares'] = rs
                     else:
-                        if room_name in opening.assigned_rooms:
-                            opening.assigned_rooms.remove(room_name)
+                        rs = getattr(opening, 'room_shares', None) or {}
+                        if isinstance(rs, dict) and room_name in rs:
+                            rs.pop(room_name, None)
+                            setattr(opening, 'room_shares', rs)
                     break
             
             # Also remove from room's opening_ids list
@@ -3619,6 +3624,8 @@ class RoomManagerTab:
                 
                 if opening_name in assigned:
                     assigned.remove(opening_name)
+                    if isinstance(wall, dict):
+                        wall['assigned_openings'] = assigned
                     # Trigger recalculation for this wall
                     all_openings = list(self.app.project.doors) + list(self.app.project.windows)
                     if isinstance(wall, dict):
@@ -3905,7 +3912,29 @@ class RoomManagerTab:
                 if room_key not in room_selection:
                     # Default: select ONLY the current room to avoid applying to other rooms unintentionally.
                     default_selected = bool(selected_room_key and room_key == selected_room_key)
-                    default_height = {'kitchen': 1.5, 'bath': 2.4, 'toilet': 1.5, 'balcony': 1.2}.get(rtype, 1.5)
+                    # IMPORTANT: For bathrooms/toilets, users typically mean full-height wall ceramic.
+                    # Use unified height resolution: explicit > derived > segments > default
+                    if rtype in ('bath', 'toilet'):
+                        try:
+                            from bilind.calculations.unified_calculator import UnifiedCalculator
+                            
+                            # Priority 1: Explicit wall_height
+                            wh = adapter.wall_height
+                            if wh not in (None, '', 0, 0.0, 3.0):  # 3.0 is likely default, not explicit
+                                default_height = float(wh)
+                            else:
+                                # Priority 2: Derive from walls_gross / perimeter
+                                calc = UnifiedCalculator(self.app.project)
+                                walls_gross = calc.calculate_walls_gross(room)
+                                perim = adapter.perimeter
+                                if walls_gross > 0 and perim > 0:
+                                    default_height = walls_gross / perim
+                                else:
+                                    default_height = float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+                        except Exception:
+                            default_height = float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+                    else:
+                        default_height = {'kitchen': 1.5, 'balcony': 1.2}.get(rtype, 1.5)
                     room_selection[room_key] = {
                         'selected': default_selected,
                         'default_height': default_height,
@@ -4036,11 +4065,19 @@ class RoomManagerTab:
             if not walls:
                 # Create default walls based on perimeter if no walls exist
                 if adapter.perimeter > 0:
-                    # Create 4 default walls for rectangular room or use perimeter
+                    # IMPORTANT: use the room perimeter as SSOT for quick ceramic.
+                    # Some drawings have width/length that don't reconcile with perimeter,
+                    # which causes under-tiling (and leftover paint) in quick mode.
                     default_height = room_data['default_height']
-                    if adapter.width > 0 and adapter.length > 0:
-                        # Rectangular - 4 walls
-                        from bilind.models.wall import Wall
+
+                    # If width/length are consistent with perimeter (rectangular), we can keep them.
+                    # Otherwise, fall back to perimeter-based synthetic walls.
+                    perim = float(adapter.perimeter or 0.0)
+                    approx_rect = 2.0 * float(adapter.width or 0.0) + 2.0 * float(adapter.length or 0.0)
+                    rect_ok = (approx_rect > 0.0) and (perim > 0.0) and (abs(approx_rect - perim) / perim <= 0.05)
+
+                    from bilind.models.wall import Wall
+                    if rect_ok:
                         walls = [
                             Wall(name="جدار 1", length=adapter.width, height=default_height),
                             Wall(name="جدار 2", length=adapter.length, height=default_height),
@@ -4048,9 +4085,14 @@ class RoomManagerTab:
                             Wall(name="جدار 4", length=adapter.length, height=default_height),
                         ]
                     else:
-                        # Irregular - single wall with full perimeter
-                        from bilind.models.wall import Wall
-                        walls = [Wall(name="جميع الجدران", length=adapter.perimeter, height=default_height)]
+                        # Perimeter-based: 4 equal walls, sum(lengths)=perimeter
+                        seg = perim / 4.0 if perim > 0 else 0.0
+                        walls = [
+                            Wall(name="جدار 1", length=seg, height=default_height),
+                            Wall(name="جدار 2", length=seg, height=default_height),
+                            Wall(name="جدار 3", length=seg, height=default_height),
+                            Wall(name="جدار 4", length=seg, height=default_height),
+                        ]
                 else:
                     ttk.Label(
                         walls_canvas_inner,

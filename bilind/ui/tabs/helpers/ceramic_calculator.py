@@ -13,6 +13,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import TYPE_CHECKING, List, Dict, Any, Optional, Callable
 from bilind.models.finish import CeramicZone
+from bilind.ui.tabs.helpers.room_adapter import RoomAdapter
+from bilind.calculations.unified_calculator import UnifiedCalculator
+import statistics
 
 if TYPE_CHECKING:
     from bilind_main import BilindEnhanced
@@ -24,7 +27,8 @@ CERAMIC_PRESETS = {
         'name': 'حمام كامل', 
         'icon': '🚿', 
         'surface': 'wall', 
-        'height': 2.4, 
+        # Use project.default_wall_height at runtime (avoids hardcoding 2.4m)
+        'height': None,
         'category': 'Bathroom', 
         'floor': True
     },
@@ -49,7 +53,8 @@ CERAMIC_PRESETS = {
         'name': 'مطبخ كامل', 
         'icon': '🏠', 
         'surface': 'wall', 
-        'height': 2.4, 
+        # Use project.default_wall_height at runtime (avoids hardcoding 2.4m)
+        'height': None,
         'category': 'Kitchen', 
         'floor': True
     },
@@ -391,10 +396,9 @@ class CeramicCalculatorDialog:
         """Apply a preset configuration."""
         preset = CERAMIC_PRESETS[preset_key]
         self.surface_var.set(preset['surface'])
-        self.height_var.set(str(preset['height']))
-        self.start_height_var.set(str(preset.get('start', 0.0)))
         self.category_var.set(preset['category'])
         self.include_floor_var.set(preset.get('floor', False))
+        self.start_height_var.set(str(preset.get('start', 0.0)))
         
         # Auto-select matching rooms
         for var, room in self.room_vars:
@@ -411,6 +415,43 @@ class CeramicCalculatorDialog:
             
             if should_select:
                 var.set(True)
+        
+        # Resolve height (smart logic)
+        preset_h = preset.get('height', None)
+        if preset_h in (None, '', 0, 0.0):
+            # Try to resolve from selected rooms
+            selected_rooms = [room for var, room in self.room_vars if var.get()]
+            resolved_heights = []
+            
+            if selected_rooms:
+                calc = UnifiedCalculator(self.app.project)
+                for room in selected_rooms:
+                    adapter = RoomAdapter(room)
+                    
+                    # Priority 1: Explicit wall_height
+                    wh = adapter.wall_height
+                    if wh not in (None, '', 0, 0.0):
+                        resolved_heights.append(float(wh))
+                        continue
+                        
+                    # Priority 2: Derive from walls
+                    walls_gross = calc.calculate_walls_gross(room)
+                    perim = adapter.perimeter
+                    if walls_gross > 0 and perim > 0:
+                        resolved_heights.append(walls_gross / perim)
+            
+            if resolved_heights:
+                # Use the most common height (mode) to handle outliers
+                try:
+                    preset_h = statistics.mode(resolved_heights)
+                except:
+                    preset_h = resolved_heights[0]
+            
+            # Fallback to project default if still not found
+            if preset_h in (None, '', 0, 0.0):
+                preset_h = float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+                
+        self.height_var.set(str(preset_h))
         
         self._update_preview()
     

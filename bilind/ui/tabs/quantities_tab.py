@@ -334,13 +334,21 @@ class QuantitiesTab(BaseTab):
         elif category == 'Doors':
             if not messagebox.askyesno("Confirm", "Delete selected door?"):
                 return
-            del self.app.project.doors[idx]
-            self.app.refresh_openings()
+            # Cascade: remove from rooms + walls + quantities
+            if hasattr(self.app, 'delete_opening_at_index'):
+                self.app.delete_opening_at_index('DOOR', idx, confirm=False)
+            else:
+                del self.app.project.doors[idx]
+                self.app.refresh_openings()
         elif category == 'Windows':
             if not messagebox.askyesno("Confirm", "Delete selected window?"):
                 return
-            del self.app.project.windows[idx]
-            self.app.refresh_openings()
+            # Cascade: remove from rooms + walls + quantities
+            if hasattr(self.app, 'delete_opening_at_index'):
+                self.app.delete_opening_at_index('WINDOW', idx, confirm=False)
+            else:
+                del self.app.project.windows[idx]
+                self.app.refresh_openings()
         self.refresh_data()
         self.app.update_status("Item deleted", icon="🗑️")
 

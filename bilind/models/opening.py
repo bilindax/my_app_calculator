@@ -158,6 +158,10 @@ class Opening:
             result['share_mode'] = self.share_mode
         if self.room_shares:
             result['room_shares'] = dict(self.room_shares)
+
+        if self.room_quantities:
+            # Persist per-room quantities (critical for Room Manager edits)
+            result['room_quantities'] = dict(self.room_quantities)
         
         if self.opening_type == 'WINDOW':
             glass_area = self.calculate_glass_area()
@@ -200,6 +204,20 @@ class Opening:
         quantity = data.get('quantity')
         if quantity is None:
             quantity = data.get('qty', 1)
+
+        # Restore per-room quantities (if present)
+        room_quantities_raw = data.get('room_quantities')
+        room_quantities: Optional[Dict[str, int]] = None
+        if isinstance(room_quantities_raw, dict) and room_quantities_raw:
+            normalized: Dict[str, int] = {}
+            for room_name, q in room_quantities_raw.items():
+                if not room_name:
+                    continue
+                try:
+                    normalized[str(room_name)] = max(1, int(q))
+                except (TypeError, ValueError):
+                    normalized[str(room_name)] = 1
+            room_quantities = normalized or None
         
         return cls(
             name=data.get('name', 'Opening'),
@@ -213,7 +231,8 @@ class Opening:
             host_wall=data.get('host_wall'),
             assigned_rooms=data.get('assigned_rooms'),
             share_mode=data.get('share_mode'),
-            room_shares=data.get('room_shares')
+            room_shares=data.get('room_shares'),
+            room_quantities=room_quantities,
         )
     
     def __repr__(self) -> str:

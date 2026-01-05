@@ -831,12 +831,61 @@ class BilindEnhanced:
             if not walls:
                 continue
             for wall in walls:
-                wall_openings = wall.get('opening_ids') if isinstance(wall, dict) else getattr(wall, 'opening_ids', None)
-                if wall_openings and opening_name in wall_openings:
+                # 1) opening_ids
+                wall_opening_ids = wall.get('opening_ids') if isinstance(wall, dict) else getattr(wall, 'opening_ids', None)
+                if wall_opening_ids and opening_name in wall_opening_ids:
                     if isinstance(wall, dict):
-                        wall['opening_ids'] = [oid for oid in wall_openings if oid != opening_name]
+                        wall['opening_ids'] = [oid for oid in wall_opening_ids if oid != opening_name]
                     else:
-                        wall.opening_ids = [oid for oid in wall_openings if oid != opening_name]
+                        wall.opening_ids = [oid for oid in wall_opening_ids if oid != opening_name]
+
+                # 2) assigned_openings (used by room visuals / wall distribution)
+                wall_assigned = wall.get('assigned_openings') if isinstance(wall, dict) else getattr(wall, 'assigned_openings', None)
+                if wall_assigned and opening_name in wall_assigned:
+                    if isinstance(wall, dict):
+                        wall['assigned_openings'] = [oid for oid in wall_assigned if oid != opening_name]
+                    else:
+                        wall.assigned_openings = [oid for oid in wall_assigned if oid != opening_name]
+
+    def delete_opening_at_index(self, opening_type: str, idx: int, *, confirm: bool = True) -> bool:
+        """Delete an opening by index and cascade removal from rooms/walls.
+
+        This is used by non-RoomsTab UIs (e.g. QuantitiesTab) that know the index
+        but not the RoomsTab selection state.
+        """
+        storage = self.project.doors if opening_type == 'DOOR' else self.project.windows
+        if idx is None or idx < 0 or idx >= len(storage):
+            return False
+
+        opening = storage[idx]
+        opening_name = self._opening_name(opening)
+        if not opening_name:
+            return False
+
+        if confirm:
+            if not messagebox.askyesno("Confirm", f"Delete {opening_type.lower()} '{opening_name}'?"):
+                return False
+
+        removed_links = self._unlink_opening_from_all_rooms(opening_name)
+        self._remove_opening_from_walls(opening_name)
+        del storage[idx]
+
+        # Refresh UI / calculations
+        self.refresh_openings()
+        if hasattr(self, 'rooms_tab'):
+            self.rooms_tab.refresh_data()
+        if hasattr(self, 'room_manager_tab'):
+            try:
+                self.room_manager_tab.refresh_rooms_list()
+                if self.room_manager_tab.selected_room:
+                    self.room_manager_tab._refresh_openings_trees()
+            except Exception:
+                pass
+
+        icon = "🚪" if opening_type == 'DOOR' else "🪟"
+        extra = f" and cleared {removed_links} room link(s)" if removed_links else ""
+        self.update_status(f"Deleted {opening_type.lower()} '{opening_name}'{extra}", icon=icon)
+        return True
 
     def _fmt(self, value, digits=2, default='-'):
         """Format numeric value for display using imported helper."""
@@ -3979,7 +4028,25 @@ class BilindEnhanced:
                 existing_names = {self._opening_name(o) for i, o in enumerate(storage) if i != idx}
                 if name in existing_names:
                     name = self._make_unique_name(opening_type, name)
+                
+                # CRITICAL: Preserve room-specific assignments when editing opening data
+                # (Changing width/height/qty in data tab should NOT erase room_quantities)
+                old_opening = storage[idx]
+                
                 new_record = self._build_opening_record(opening_type, name, type_var.get(), width, height, qty, weight, layer=layer, placement_height=placement_height, total_count=total_count)
+                
+                # Copy room assignment fields from old opening to new record
+                if isinstance(old_opening, dict):
+                    for field in ['room_quantities', 'assigned_rooms', 'share_mode', 'room_shares']:
+                        if field in old_opening:
+                            new_record[field] = old_opening[field]
+                else:
+                    # Opening dataclass
+                    for field in ['room_quantities', 'assigned_rooms', 'share_mode', 'room_shares']:
+                        val = getattr(old_opening, field, None)
+                        if val is not None:
+                            new_record[field] = val
+                
                 storage[idx] = new_record
                 self.refresh_openings()
                 dialog.destroy()
@@ -5025,6 +5092,7 @@ class BilindEnhanced:
                 if data_type in ['doors', 'windows']:
                     opening_name = self._opening_name(storage[i])
                     self._unlink_opening_from_all_rooms(opening_name)
+                    self._remove_opening_from_walls(opening_name)
                 del storage[i]
             
             if data_type == 'rooms':

@@ -201,6 +201,24 @@ class TestOpening:
         assert data['glass'] > 0  # Should have glass area
         assert data['weight'] == 0.0  # Windows have no weight
 
+    def test_opening_room_quantities_roundtrip(self):
+        """room_quantities should persist through to_dict/from_dict."""
+        door = Opening(
+            name="D-RQ",
+            opening_type="DOOR",
+            material_type="Steel",
+            layer="A-DOOR",
+            width=0.9,
+            height=2.1,
+            quantity=3,
+            room_quantities={"Corridor": 6}
+        )
+        data = door.to_dict()
+        assert data.get('room_quantities') == {"Corridor": 6}
+
+        restored = Opening.from_dict(data)
+        assert restored.room_quantities == {"Corridor": 6}
+
 
 class TestWall:
     """Tests for Wall data model."""

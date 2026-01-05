@@ -283,12 +283,21 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
         
         ws['B2'] = "ملخص الكميات (SSOT Verified)"; ws['B2'].font = FONT_HEADER
         
+        # ✅ SSOT: جلب الملخص من المحرك
+        summary = calc.get_project_summary(getattr(project, 'rooms', []) or [])
+        
+        # ==================== FIX: USE SSOT FOR OPENINGS & STONE ====================
+        # بدلاً من الحساب اليدوي هنا، نطلب البيانات من المحرك الموحد
+        # هذا يحل مشكلة "7 vs 22" ويضمن دقة حساب الحجر
+        ops_data = calc.get_physical_openings_data()
+        openings_count = ops_data['total_count']  # العدد الفعلي للفتحات (22 وليس 7)
+        # ============================================================================
+        
         doors = getattr(project, 'doors', []) or []
         windows = getattr(project, 'windows', []) or []
         doors_area = sum(get_opening_area(o) for o in doors)
         windows_area = sum(get_opening_area(o) for o in windows)
         openings_area = doors_area + windows_area
-        openings_count = len(doors) + len(windows)
 
         tiles_items = getattr(project, 'tiles_items', []) or []
         tiles_total = sum(fnum(val(i, 'area', 0.0)) for i in tiles_items)
@@ -298,16 +307,17 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
 
         data = [
             ("عدد الغرف", len(getattr(project, 'rooms', []) or []), ""),
-            ("مساحات الأرضيات (إجمالي)", project_totals.get('area_total', 0.0), "م²"),
-            ("أعمال الزريقة (SSOT)", project_totals.get('plaster_total', 0.0), "م²"),
-            ("أعمال الدهان (SSOT)", project_totals.get('paint_total', 0.0), "م²"),
-            ("سيراميك الجدران (SSOT)", project_totals.get('ceramic_wall', 0.0), "م²"),
-            ("سيراميك الأرضيات (SSOT)", project_totals.get('ceramic_floor', 0.0), "م²"),
-            ("إجمالي السيراميك (SSOT)", project_totals.get('ceramic_total', 0.0), "م²"),
-            ("نعلات (SSOT)", project_totals.get('baseboard_total', 0.0), "م.ط"),
-            ("حجر/أطر (SSOT)", project_totals.get('stone_total', 0.0), "م.ط"),
+            ("مساحات الأرضيات (إجمالي)", summary['total_floor_area'], "م²"),
+            ("أعمال الزريقة (SSOT)", summary['total_plaster'], "م²"),
+            ("أعمال الدهان (SSOT)", summary['total_paint'], "م²"),
+            ("سيراميك الجدران (SSOT)", summary['total_ceramic_wall'], "م²"),
+            ("سيراميك الأرضيات (SSOT)", summary['total_ceramic_floor'], "م²"),
+            ("سيراميك الأسقف (SSOT)", summary['total_ceramic_ceiling'], "م²"),
+            ("إجمالي السيراميك (SSOT)", summary['total_ceramic'], "م²"),
+            ("نعلات (SSOT)", summary['total_baseboard'], "م.ط"),
+            ("حجر/أطر (مجموع الغرف)", summary['total_stone'], "م.ط"),
             ("مساحة الفتحات (أبواب+شبابيك)", openings_area, "م²"),
-            ("عدد الفتحات (أبواب+شبابيك)", openings_count, ""),
+            ("عدد الفتحات (أبواب+شبابيك)", openings_count, "قطعة"),
             ("بلاط الأرضيات (دفتر البنود)", tiles_total, "م²"),
             ("نعلات (دفتر البنود)", baseboards_items_total, "م.ط"),
         ]
@@ -323,15 +333,16 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
             "م", "الغرفة", "النوع", "المحيط", "ارتفاع الجدار",
             "مساحة الأرضية", "جدران قائمة", "خصم فتحات", "جدران صافية",
             "زريقة جدران", "زريقة سقف", "دهان جدران", "دهان سقف",
-            "سيراميك جدران", "سيراميك أرضيات", "سيراميك سقف",
-            "نعلات", "حجر/أطر"
+            "سيراميك الجدران - قائم", "خصم فتحات السيراميك", "سيراميك الجدران - صافي (SSOT)",
+            "سيراميك أرضيات", "سيراميك سقف",
+            "نعلات", "حجر/أطر", "ملاحظات النعلات"
         ])
         
         for i, r in enumerate(project.rooms, 2):
             name = val(r, 'name', '-')
             rtype = val(r, 'room_type', '')
             perim = fnum(val(r, 'perimeter', 0.0))
-            # Wall height: check if room has multiple walls with different heights
+            # Wall height logic...
             walls = val(r, 'walls', [])
             if walls and len(walls) > 1:
                 heights = set()
@@ -344,28 +355,73 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
                 if len(heights) > 1:
                     min_h = min(heights)
                     max_h = max(heights)
-                    wh = f"{min_h:.2f}-{max_h:.2f}"  # Show range as text
+                    wh = f"{min_h:.2f}-{max_h:.2f}"
                 elif heights:
                     wh = next(iter(heights))
                 else:
                     wh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
             else:
                 wh = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
-            # FETCH FROM SSOT
-            d = rooms_map.get(name)
             
-            if d:
-                write_row(ws, i, [
-                    i-1, name, rtype, perim, wh,
-                    d.ceiling_area, d.walls_gross,
-                    d.walls_openings, d.walls_net,
-                    d.plaster_walls, d.plaster_ceiling,
-                    d.paint_walls, d.paint_ceiling,
-                    d.ceramic_wall, d.ceramic_floor, d.ceramic_ceiling,
-                    d.baseboard_length, d.stone_length
-                ])
-            else:
-                write_row(ws, i, [i-1, name, rtype, perim, wh] + [0] * 13)
+            # ✅ SSOT: جلب البيانات الجاهزة من المحرك
+            metrics = calc.get_room_metrics(r)
+            
+            # Fetch some raw data for columns not in metrics (like gross walls, openings)
+            # Although metrics has net, we might want to keep the breakdown columns if possible.
+            # But the user said "Passive Consumer".
+            # Let's use the metrics for the critical values.
+            # For gross/openings, we can still use the calc.calculate_room(r) result or just re-calculate locally if needed,
+            # but ideally we should trust metrics.
+            # However, metrics DTO doesn't have gross/openings breakdown.
+            # I will use calc.calculate_room(r) for the breakdown columns to maintain the sheet structure,
+            # but use metrics for the final values.
+            
+            # Actually, let's stick to the user's request: "Passive Consumer".
+            # The user's DTO example didn't have gross/openings.
+            # But the sheet has them.
+            # I will use the `calc.calculate_room(r)` which is also SSOT, just more detailed.
+            # Wait, the user specifically asked to use `metrics` for `floor_area`, `ceramic`, `baseboard`.
+            
+            # Let's use `metrics` for the values it provides, and `calc.calculate_room(r)` for the others (gross, openings).
+            # Since `get_room_metrics` calls `calculate_room`, they are consistent.
+            
+            rc = calc.calculate_room(r)
+
+            # Wall ceramic gross + opening deductions (band-specific) from SSOT zone metrics
+            zones = getattr(project, 'ceramic_zones', []) or []
+            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(metrics.room_name)]
+            wall_z = [z for z in room_z if norm_text(val(z, 'surface_type', 'wall')) == 'wall']
+            cer_wall_gross = 0.0
+            cer_wall_deduct = 0.0
+            if wall_z:
+                for z in wall_z:
+                    m = calc.calculate_zone_metrics(z)
+                    try:
+                        cer_wall_gross += fnum(getattr(m, 'gross_area', 0.0) or 0.0)
+                        cer_wall_deduct += fnum(getattr(m, 'deduction_area', 0.0) or 0.0)
+                    except Exception:
+                        continue
+            cer_wall_deduct = max(0.0, cer_wall_deduct)
+            
+            write_row(ws, i, [
+                i-1, metrics.room_name, rtype, perim, wh,
+                metrics.floor_area,       # SSOT
+                rc.walls_gross,           # From calc
+                rc.walls_openings,        # From calc
+                metrics.wall_area_net,    # SSOT
+                metrics.zariqa_walls,     # SSOT
+                metrics.zariqa_ceiling,   # SSOT
+                metrics.paint_walls,      # SSOT
+                metrics.paint_ceiling,    # SSOT
+                cer_wall_gross,
+                cer_wall_deduct,
+                metrics.ceramic_walls,    # SSOT net
+                metrics.ceramic_floor,    # SSOT
+                metrics.ceramic_ceiling,  # SSOT
+                metrics.baseboard_length_net, # SSOT (Corrected)
+                metrics.stone_frames_length,  # SSOT
+                metrics.baseboard_status      # SSOT
+            ])
 
         auto_fit(ws)
 
@@ -373,25 +429,57 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
     if ensure_sheet('plaster'):
         ws = wb.create_sheet("أعمال الزريقة")
         setup_sheet(ws, "أعمال الزريقة")
-        write_header(ws, ["م", "الغرفة", "العنصر", "المساحة القائمة", "خصم", "الصافي"])
+        write_header(ws, [
+            "م",
+            "الغرفة",
+            "العنصر",
+            "المحيط (م)",
+            "الارتفاع (م)",
+            "مساحة الأرضية (م²)",
+            "المساحة القائمة",
+            "خصم",
+            "الصافي",
+        ])
         
         r_idx = 2
         for r in project.rooms:
             name = val(r, 'name', '-')
             d = rooms_map.get(name)
             if not d: continue
+
+            # Room geometry (same approach as other sheets)
+            perim = fnum(val(r, 'perimeter', None) or val(r, 'perim', 0.0))
+            area = fnum(val(r, 'area', 0.0))
+            walls = val(r, 'walls', [])
+            room_h: Any
+            if walls and len(walls) > 1:
+                heights = set()
+                for w_item in walls:
+                    wh_val = fnum(val(w_item, 'height', 0.0))
+                    if wh_val <= 0:
+                        wh_val = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+                    if wh_val > 0:
+                        heights.add(round(wh_val, 2))
+                if len(heights) > 1:
+                    room_h = f"{min(heights):.2f}-{max(heights):.2f}"
+                elif heights:
+                    room_h = next(iter(heights))
+                else:
+                    room_h = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+            else:
+                room_h = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
             
             # Wall Row (Get exact values from calculator)
             # Net Plaster = d.plaster_walls
             # Gross = d.walls_gross
             # Deduct = Gross - Net
             w_deduct = d.walls_gross - d.plaster_walls
-            write_row(ws, r_idx, [r_idx-1, name, "جدران", d.walls_gross, w_deduct, d.plaster_walls])
+            write_row(ws, r_idx, [r_idx-1, name, "جدران", perim, room_h if room_h else '-', area, d.walls_gross, w_deduct, d.plaster_walls])
             r_idx += 1
             
             # Ceiling Row
             c_deduct = d.ceiling_area - d.plaster_ceiling
-            write_row(ws, r_idx, [r_idx-1, name, "سقف", d.ceiling_area, c_deduct, d.plaster_ceiling])
+            write_row(ws, r_idx, [r_idx-1, name, "سقف", perim, room_h if room_h else '-', area, d.ceiling_area, c_deduct, d.plaster_ceiling])
             r_idx += 1
 
         auto_fit(ws)
@@ -515,13 +603,74 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
     if ensure_sheet('paint'):
         ws = wb.create_sheet("الدهان")
         setup_sheet(ws, "الدهان")
-        write_header(ws, ["م", "الغرفة", "دهان جدران", "دهان سقف", "الإجمالي"])
+        write_header(ws, [
+            "م",
+            "الغرفة",
+            "الطول (م)",
+            "العرض (م)",
+            "الارتفاع (م)",
+            "المحيط (م)",
+            "مساحة الأرضية (م²)",
+            "دهان جدران (م²)",
+            "دهان سقف (م²)",
+            "الإجمالي (م²)",
+        ])
         
         for i, r in enumerate(project.rooms, 2):
             name = val(r, 'name', '-')
             d = rooms_map.get(name)
+            # Room geometry
+            w = fnum(val(r, 'width', None) or val(r, 'w', 0.0))
+            l = fnum(val(r, 'length', None) or val(r, 'l', 0.0))
+            perim = fnum(val(r, 'perimeter', None) or val(r, 'perim', 0.0))
+            area = fnum(val(r, 'area', 0.0))
+
+            # Wall height: show single or range when per-wall heights differ
+            walls = val(r, 'walls', [])
+            room_h: Any
+            if walls and len(walls) > 1:
+                heights = set()
+                for w_item in walls:
+                    wh_val = fnum(val(w_item, 'height', 0.0))
+                    if wh_val <= 0:
+                        wh_val = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+                    if wh_val > 0:
+                        heights.add(round(wh_val, 2))
+                if len(heights) > 1:
+                    room_h = f"{min(heights):.2f}-{max(heights):.2f}"
+                elif heights:
+                    room_h = next(iter(heights))
+                else:
+                    room_h = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+            else:
+                room_h = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
+
             if d:
-                write_row(ws, i, [i-1, name, d.paint_walls, d.paint_ceiling, d.paint_total])
+                write_row(ws, i, [
+                    i-1,
+                    name,
+                    l if l > 0 else '-',
+                    w if w > 0 else '-',
+                    room_h if room_h else '-',
+                    perim,
+                    area,
+                    d.paint_walls,
+                    d.paint_ceiling,
+                    d.paint_total,
+                ])
+            else:
+                write_row(ws, i, [
+                    i-1,
+                    name,
+                    l if l > 0 else '-',
+                    w if w > 0 else '-',
+                    room_h if room_h else '-',
+                    perim,
+                    area,
+                    0.0,
+                    0.0,
+                    0.0,
+                ])
 
         auto_fit(ws)
 
@@ -646,21 +795,25 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
             "العرض (م)",
             "الارتفاع (م)",
             "المحيط (م)",
+            "مساحة الأرضية (م²)",
             "سيراميك الأرضية (م²)",
             "سيراميك السقف (م²)",
             "ارتفاع السيراميك (م)",
-            "سيراميك الجدران (م²) (موحّد)",
+            "سيراميك الجدران - قائم (م²)",
+            "خصم فتحات السيراميك (م²)",
+            "سيراميك الجدران - صافي (SSOT) (م²)",
         ])
         row = 2
         zones = getattr(project, 'ceramic_zones', []) or []
         for idx, r in enumerate(project.rooms, 1):
-            name = val(r, 'name', '-')
-            d = rooms_map.get(name)
+            # ✅ SSOT: جلب البيانات الجاهزة من المحرك
+            metrics = calc.get_room_metrics(r)
             
             # Get room geometry
             w = fnum(val(r, 'width', None) or val(r, 'w', 0.0))
             l = fnum(val(r, 'length', None) or val(r, 'l', 0.0))
             perim = fnum(val(r, 'perimeter', None) or val(r, 'perim', 0.0))
+            area = fnum(val(r, 'area', 0.0))
             # Room height (single value or range when per-wall heights differ)
             walls = val(r, 'walls', [])
             room_h: Any
@@ -682,8 +835,11 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
                 room_h = fnum(val(r, 'wall_height', 0.0) or val(r, 'height', 0.0))
 
             # Ceramic heights (uniform vs varied)
-            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(name)]
+            room_z = [z for z in zones if norm_text(val(z, 'room_name', '')) == norm_text(metrics.room_name)]
             wall_z = [z for z in room_z if norm_text(val(z, 'surface_type', 'wall')) == 'wall']
+            
+            
+
             sigs = set()
             for z in wall_z:
                 h = fnum(val(z, 'height', 0.0))
@@ -694,29 +850,49 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
             if wall_height_uniform and sigs:
                 # Display the (single) wall ceramic height
                 ceramic_height_display: Any = next(iter(sigs))[1]
+                # DATA QUALITY: Ensure it's a clean number (not a string like "0.60-3.20")
+                try:
+                    ceramic_height_display = fnum(ceramic_height_display)
+                except Exception:
+                    ceramic_height_display = "-"
             elif not sigs:
                 ceramic_height_display = "-"
             else:
                 ceramic_height_display = "متعدد"
             
             # SSOT values
-            cer_floor = fnum(getattr(d, 'ceramic_floor', 0.0) or 0.0) if d else 0.0
-            cer_ceiling = fnum(getattr(d, 'ceramic_ceiling', 0.0) or 0.0) if d else 0.0
-            cer_wall_total = fnum(getattr(d, 'ceramic_wall', 0.0) or 0.0) if d else 0.0
-            cer_wall_unified: Any = cer_wall_total if wall_height_uniform else "-"
+            cer_floor = metrics.ceramic_floor
+            cer_ceiling = metrics.ceramic_ceiling
+            cer_wall_net = metrics.ceramic_walls  # SSOT net
+
+            # Opening deductions for wall ceramic are band-specific (start_height + height)
+            cer_wall_gross = 0.0
+            cer_wall_deduct = 0.0
+            if wall_z:
+                for z in wall_z:
+                    m = calc.calculate_zone_metrics(z)
+                    try:
+                        cer_wall_gross += fnum(getattr(m, 'gross_area', 0.0) or 0.0)
+                        cer_wall_deduct += fnum(getattr(m, 'deduction_area', 0.0) or 0.0)
+                    except Exception:
+                        continue
+            cer_wall_deduct = max(0.0, cer_wall_deduct)
             
             write_row(ws, row, [
                 idx,
-                name,
+                metrics.room_name,
                 1,
                 l if l > 0 else '-',
                 w if w > 0 else '-',
                 room_h if room_h else '-',
                 perim,
+                area,
                 cer_floor,
                 cer_ceiling,
                 ceramic_height_display,
-                cer_wall_unified,
+                cer_wall_gross,
+                cer_wall_deduct,
+                cer_wall_net,
             ])
             row += 1
 
@@ -822,12 +998,17 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
         setup_sheet(ws, "النعلات")
 
         # SSOT per-room
-        write_header(ws, ["م", "الغرفة", "نعلات (م.ط)"])
+        write_header(ws, ["م", "الغرفة", "نعلات (م.ط)", "ملاحظات"])
         row = 2
         for i, r in enumerate(project.rooms, 2):
-            name = val(r, 'name', '-')
-            d = rooms_map.get(name)
-            write_row(ws, row, [row-1, name, (d.baseboard_length if d else 0.0)])
+            # ✅ SSOT: جلب البيانات الجاهزة من المحرك
+            metrics = calc.get_room_metrics(r)
+            write_row(ws, row, [
+                row-1, 
+                metrics.room_name, 
+                metrics.baseboard_length_net,
+                metrics.baseboard_status
+            ])
             row += 1
 
         # Items ledger (if user uses Baseboard model)
@@ -859,7 +1040,9 @@ def export_comprehensive_book(project: Any, filepath: str, app: Any = None, stat
         ws = wb.create_sheet("الحجر")
         setup_sheet(ws, "الحجر")
 
-        write_header(ws, ["م", "الغرفة", "حجر/أطر (م.ط) - SSOT"])
+        write_header(ws, ["م", "الغرفة", "حجر/أطر (م.ط)"])
+        # ملاحظة: الحجر يُحسب per-room (الفتحات المربوطة بكل غرفة)
+        # إذا كان باب مشترك بين غرفتين، يظهر في حساب كلا الغرفتين
         row = 2
         for r in project.rooms:
             name = val(r, 'name', '-')

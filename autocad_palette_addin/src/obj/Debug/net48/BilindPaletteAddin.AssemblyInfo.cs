@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("BilindPaletteAddin")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+16481e3c9e501123ea556e81a13a4fcfe688501b")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1628377fbea04d9d4079e4a7375a959df82eecfa")]
 [assembly: System.Reflection.AssemblyProductAttribute("BilindPaletteAddin")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BilindPaletteAddin")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

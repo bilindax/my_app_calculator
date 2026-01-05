@@ -190,6 +190,7 @@ def build_opening_record(
         'w': width,
         'h': height,
         'qty': qty,
+        'quantity': qty,  # Compatibility with code paths that read `quantity`
         'total_count': total_count,  # Total across all rooms/walls
         'placement_height': placement_height,
         'perim_each': perim_each,

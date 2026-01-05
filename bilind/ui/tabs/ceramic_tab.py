@@ -100,10 +100,7 @@ class CeramicTab(BaseTab):
         btn_bar2.pack(fill=tk.X, pady=(0, 10))
 
         for text, command, style in [
-            ("🚿 حمام كامل", self.preset_bathroom_full, 'Accent.TButton'),
-            ("🚽 تواليت...", self.preset_toilet, 'Secondary.TButton'),
-            ("🍳 مطبخ...", self.preset_kitchen, 'Secondary.TButton'),
-            ("🪟 بلكون...", self.preset_balcony, 'Secondary.TButton'),
+            # (Removed) Bathroom/Toilet/Kitchen/Balcony preset buttons per user request
             ("⚡ سيراميك سريع", self.quick_ceramic_wizard, 'Success.TButton'),
             ("➕ Add Zone", self.add_ceramic_zone, 'Accent.TButton'),
             ("✏️ Edit", self.edit_ceramic_zone, 'Secondary.TButton'),
@@ -113,6 +110,7 @@ class CeramicTab(BaseTab):
 
         for text, command, style in [
             ("🚫 حذف سيراميك الغرفة", self.delete_room_ceramic, 'Warning.TButton'),
+            ("📉 خصومات الفتحات (سيراميك)", self.show_ceramic_openings_deductions_by_room, 'Secondary.TButton'),
             ("🧹 حذف كل السيراميك", self.delete_all_ceramic, 'Danger.TButton')
         ]:
             self.create_button(btn_bar2, text, command, style).pack(side=tk.LEFT, padx=4)
@@ -181,13 +179,47 @@ class CeramicTab(BaseTab):
             return 0.0
 
     def _room_wall_height(self, room) -> float:
+        """Get wall height with improved priority: room.wall_height > derived > segments > project default."""
+        from ...calculations.unified_calculator import UnifiedCalculator
+        
+        default_h = float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
         try:
-            h = getattr(room, 'wall_height', None) if not isinstance(room, dict) else room.get('wall_height', None)
-            if h is None:
-                h = getattr(self.app.project, 'default_wall_height', 3.0)
-            return float(h or 3.0)
+            # Priority 1: Derive from walls_gross / perimeter (SSOT)
+            calc = UnifiedCalculator(self.app.project)
+            walls_gross = calc.calculate_walls_gross(room)
+            
+            if isinstance(room, dict):
+                perim = float(room.get('perimeter', 0) or room.get('perim', 0) or 0)
+            else:
+                perim = float(getattr(room, 'perimeter', 0) or getattr(room, 'perim', 0) or 0)
+            
+            # If perimeter is 0, try summing wall lengths
+            if perim <= 0.01:
+                walls = room.get('walls', []) if isinstance(room, dict) else getattr(room, 'walls', [])
+                if walls:
+                    perim = sum(float((w.get('length', 0) if isinstance(w, dict) else getattr(w, 'length', 0)) or 0) for w in walls)
+            
+            if walls_gross > 0 and perim > 0:
+                derived_h = walls_gross / perim
+                if derived_h > 0.5:  # Sanity check
+                    return derived_h
+            
+            # Priority 3: Max from wall_segments
+            if isinstance(room, dict):
+                segs = room.get('wall_segments', []) or []
+                heights = [float(s.get('height', 0.0) or 0.0) for s in segs if isinstance(s, dict)]
+            else:
+                segs = getattr(room, 'wall_segments', []) or []
+                heights = [float((s.get('height', 0.0) if isinstance(s, dict) else getattr(s, 'height', 0.0)) or 0.0) for s in segs]
+            
+            heights = [h for h in heights if h > 0.0]
+            if heights:
+                return max(heights)
+            
+            # Priority 4: Project default
+            return default_h
         except Exception:
-            return float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+            return default_h
 
     def _iter_room_walls(self, room):
         walls = getattr(room, 'walls', None) if not isinstance(room, dict) else room.get('walls')
@@ -824,17 +856,57 @@ class CeramicTab(BaseTab):
             messagebox.showinfo("No Ceramic", "لا يوجد سيراميك لحذفه.")
             return
 
+        def _get_zone_room_name(zone, known_room_names):
+            """Best-effort: return room name for a ceramic zone.
+
+            Some legacy zones may have empty room_name; try to infer from the zone name.
+            """
+            if isinstance(zone, dict):
+                room_name = (zone.get('room_name') or '').strip()
+                zone_name = (zone.get('name') or '').strip()
+            else:
+                room_name = (getattr(zone, 'room_name', '') or '').strip()
+                zone_name = (getattr(zone, 'name', '') or '').strip()
+
+            if room_name:
+                return room_name
+
+            if not zone_name:
+                return None
+
+            # Common pattern: "سيراميك - ROOM_NAME - جدار N" (or similar)
+            try:
+                parts = [p.strip() for p in zone_name.split('-')]
+                if len(parts) >= 3 and 'سيراميك' in parts[0]:
+                    candidate = parts[1].strip()
+                    if candidate:
+                        return candidate
+            except Exception:
+                pass
+
+            # Fallback: find any known room name embedded in the zone name
+            for rn in known_room_names:
+                if rn and rn in zone_name:
+                    return rn
+
+            return None
+
         # Collect room names and total area per room
+        known_room_names = set()
+        for room in self.app.project.rooms or []:
+            rn = room.get('name') if isinstance(room, dict) else getattr(room, 'name', None)
+            if rn:
+                known_room_names.add(str(rn))
+
+        # Use the same area logic as the grid (handles effective_area safely)
+        from ...calculations.helpers import safe_zone_area
+
         room_map = {}
         for z in zones:
-            room_name = getattr(z, 'room_name', None) if not isinstance(z, dict) else z.get('room_name')
-            label = room_name or getattr(z, 'name', None) or (z.get('name') if isinstance(z, dict) else "")
-            if not label:
-                label = "(غير مرتبط بغرفة)"
-            area = float(getattr(z, 'effective_area', None) if not isinstance(z, dict) else z.get('effective_area', 0.0) or 0.0)
-            perim = float(getattr(z, 'perimeter', 0.0) if not isinstance(z, dict) else z.get('perimeter', 0.0) or 0.0)
-            height = float(getattr(z, 'height', 0.0) if not isinstance(z, dict) else z.get('height', 0.0) or 0.0)
-            eff_area = area if area > 0 else perim * height
+            inferred_room = _get_zone_room_name(z, known_room_names)
+            label = inferred_room or "(غير مرتبط بغرفة)"
+
+            eff_area = float(safe_zone_area(z) or 0.0)
             room_map.setdefault(label, 0.0)
             room_map[label] += eff_area
 
@@ -846,7 +918,13 @@ class CeramicTab(BaseTab):
         selected_names = {s['item']['name'] for s in sel}
 
         before = len(zones)
-        self.app.project.ceramic_zones = [z for z in zones if (getattr(z, 'room_name', None) if not isinstance(z, dict) else z.get('room_name')) not in selected_names]
+        def _zone_selected(zone):
+            inferred = _get_zone_room_name(zone, known_room_names)
+            if inferred is None:
+                return "(غير مرتبط بغرفة)" in selected_names
+            return inferred in selected_names
+
+        self.app.project.ceramic_zones = [z for z in zones if not _zone_selected(z)]
         removed = before - len(self.app.project.ceramic_zones)
 
         # Clear wall ceramic fields + recompute affected rooms
@@ -886,6 +964,126 @@ class CeramicTab(BaseTab):
             if hasattr(self.app, 'refresh_rooms'):
                 self.app.refresh_rooms()
             self.app.update_status(f"🧹 تم حذف كل السيراميك ({count} عنصر)", icon="🧹")
+
+    def show_ceramic_openings_deductions_by_room(self):
+        """Show per-room ceramic wall deductions caused by openings (doors/windows).
+
+        Note: Deductions are computed in SSOT (UnifiedCalculator) using overlap with the zone band
+        (start_height + height), so this is the reliable view.
+        """
+        zones = self.app.project.ceramic_zones or []
+        if not zones:
+            messagebox.showinfo("No Ceramic", "لا يوجد سيراميك لعرضه.")
+            return
+
+        from ...calculations.unified_calculator import UnifiedCalculator
+
+        calc = UnifiedCalculator(self.app.project)
+        by_room = {}
+        room_order = []
+
+        def _get_attr(obj, key, attr, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, attr, default)
+
+        for z in zones:
+            surface = str(_get_attr(z, 'surface_type', 'surface_type', 'wall') or 'wall').lower()
+            if surface != 'wall':
+                continue
+            room_name = str(_get_attr(z, 'room_name', 'room_name', '') or '').strip() or '(غير مرتبط بغرفة)'
+
+            m = calc.calculate_zone_metrics(z)
+            if room_name not in by_room:
+                by_room[room_name] = {
+                    'zones': 0,
+                    'gross': 0.0,
+                    'deduct': 0.0,
+                    'net': 0.0,
+                    'details': [],
+                }
+                room_order.append(room_name)
+
+            rec = by_room[room_name]
+            rec['zones'] += 1
+            rec['gross'] += float(m.gross_area or 0.0)
+            rec['deduct'] += float(m.deduction_area or 0.0)
+            rec['net'] += float(m.net_area or 0.0)
+            det = str(m.deduction_details or '').strip()
+            if det and det not in ('لا يوجد خصم', 'No deduction'):
+                rec['details'].append(det)
+
+        if not by_room:
+            messagebox.showinfo("Info", "لا توجد مناطق سيراميك جدران (خصم الفتحات يكون على الجدران فقط).")
+            return
+
+        dlg = tk.Toplevel(self.app.root)
+        dlg.title("📉 خصومات الفتحات للسيراميك (حسب الغرفة)")
+        dlg.configure(bg=self.app.colors['bg_secondary'])
+        dlg.transient(self.app.root)
+        dlg.grab_set()
+        dlg.geometry("820x520")
+
+        container = ttk.Frame(dlg, padding=(14, 12), style='Main.TFrame')
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text="خصومات الفتحات (أبواب/شبابيك) تُحسب فقط على سيراميك الجدران حسب تداخل الفتحة مع شريط السيراميك.",
+            style='Caption.TLabel',
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        cols = ('Room', 'Zones', 'Gross', 'Deduct', 'Net')
+        tree = ttk.Treeview(container, columns=cols, show='headings', height=12)
+        tree.heading('Room', text='Room')
+        tree.heading('Zones', text='Zones')
+        tree.heading('Gross', text='Gross (m²)')
+        tree.heading('Deduct', text='Openings Deduct (m²)')
+        tree.heading('Net', text='Net (m²)')
+        tree.column('Room', width=260)
+        tree.column('Zones', width=60, anchor=tk.CENTER)
+        tree.column('Gross', width=120, anchor=tk.CENTER)
+        tree.column('Deduct', width=160, anchor=tk.CENTER)
+        tree.column('Net', width=120, anchor=tk.CENTER)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        total_g = total_d = total_n = 0.0
+        for rn in sorted(room_order):
+            rec = by_room[rn]
+            total_g += rec['gross']
+            total_d += rec['deduct']
+            total_n += rec['net']
+            tree.insert('', tk.END, iid=rn, values=(
+                rn,
+                str(rec['zones']),
+                f"{rec['gross']:.2f}",
+                f"{rec['deduct']:.2f}",
+                f"{rec['net']:.2f}",
+            ))
+
+        footer = ttk.Frame(container, style='Main.TFrame')
+        footer.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(
+            footer,
+            text=f"الإجمالي: Gross {total_g:.2f} | Deduct {total_d:.2f} | Net {total_n:.2f} (m²)",
+            style='Metrics.TLabel',
+            foreground=self.app.colors.get('accent', '#00d4ff'),
+        ).pack(side=tk.LEFT)
+
+        def _show_details():
+            sel = tree.selection()
+            if not sel:
+                return
+            rn = sel[0]
+            dets = by_room.get(rn, {}).get('details', [])
+            if not dets:
+                messagebox.showinfo("تفاصيل الخصم", "لا يوجد خصم فتحات على مناطق السيراميك لهذه الغرفة.", parent=dlg)
+                return
+            msg = "\n".join(dets)
+            messagebox.showinfo(f"تفاصيل خصم الفتحات – {rn}", msg, parent=dlg)
+
+        ttk.Button(footer, text="تفاصيل الغرفة المحددة", command=_show_details, style='Secondary.TButton').pack(side=tk.RIGHT, padx=6)
+        ttk.Button(footer, text="إغلاق", command=dlg.destroy, style='Secondary.TButton').pack(side=tk.RIGHT)
 
     def add_tiles_from_rooms(self):
         # Reuse logic from old finishes tab, but simplified
@@ -953,89 +1151,430 @@ class CeramicTab(BaseTab):
         Rules:
         - Bathroom: Full wall ceramic (perimeter × wall_height) + floor ceramic (area)
         - Kitchen: Backsplash only (perimeter × 0.6m at height 0.85m) + optional floor
-        """
-        # Find bathrooms and kitchens
-        bathrooms = []
-        kitchens = []
         
+        NEW: Shows a dialog with computed heights BEFORE applying, allowing user override.
+        """
+        from ...calculations.unified_calculator import UnifiedCalculator
+
+        def _resolve_room_wall_height(room) -> float:
+            """
+            Get wall height that matches how walls_gross is calculated.
+            Priority: 
+            1. Explicit room.wall_height (if set by user)
+            2. Derived from walls_gross / perimeter (matches SSOT)
+            3. Max height from wall_segments
+            4. Project default_wall_height
+            """
+            default_h = float(getattr(self.app.project, 'default_wall_height', 3.0) or 3.0)
+            try:
+                # Priority 1: Derive from actual wall geometry (same as UnifiedCalculator)
+                calc = UnifiedCalculator(self.app.project)
+                walls_gross = calc.calculate_walls_gross(room)
+                
+                if isinstance(room, dict):
+                    perim = float(room.get('perimeter', 0) or room.get('perim', 0) or 0)
+                else:
+                    perim = float(getattr(room, 'perimeter', 0) or getattr(room, 'perim', 0) or 0)
+                
+                # If perimeter is 0, try summing wall lengths
+                if perim <= 0.01:
+                    walls = room.get('walls', []) if isinstance(room, dict) else getattr(room, 'walls', [])
+                    if walls:
+                        perim = sum(float((w.get('length', 0) if isinstance(w, dict) else getattr(w, 'length', 0)) or 0) for w in walls)
+                
+                # Derive height from walls_gross / perimeter
+                if walls_gross > 0 and perim > 0:
+                    derived_h = walls_gross / perim
+                    if derived_h > 0.5:  # Sanity check
+                        return derived_h
+                
+                # Priority 3: If multi-segment heights exist, use the maximum
+                if isinstance(room, dict):
+                    segs = room.get('wall_segments', None) or []
+                    heights = [float(s.get('height', 0.0) or 0.0) for s in segs if isinstance(s, dict)]
+                    heights = [h for h in heights if h > 0.0]
+                    if heights:
+                        return max(heights)
+                else:
+                    segs = getattr(room, 'wall_segments', None) or []
+                    heights = []
+                    for s in segs:
+                        if isinstance(s, dict):
+                            heights.append(float(s.get('height', 0.0) or 0.0))
+                        else:
+                            heights.append(float(getattr(s, 'height', 0.0) or 0.0))
+                    heights = [h for h in heights if h > 0.0]
+                    if heights:
+                        return max(heights)
+                
+                # Priority 4: Project default
+                return default_h
+            except Exception:
+                return default_h
+
+        # Find bathrooms, toilets, kitchens, balconies, and other rooms
+        bathrooms = []
+        toilets = []
+        kitchens = []
+        balconies = []
+        others = []
+
         for r in self.app.project.rooms:
             if isinstance(r, dict):
-                rtype = r.get('room_type', '').lower()
+                rtype = (r.get('room_type', '') or '').lower()
                 name = r.get('name', '')
                 area = float(r.get('area', 0) or 0)
-                perim = float(r.get('perimeter', 0) or 0)
+                # IMPORTANT: some legacy flows store perimeter under 'perim'
+                perim = float(r.get('perim', None) or r.get('perimeter', 0) or 0)
             else:
-                rtype = getattr(r, 'room_type', '').lower()
+                rtype = (getattr(r, 'room_type', '') or '').lower()
                 name = getattr(r, 'name', '')
                 area = float(getattr(r, 'area', 0) or 0)
-                perim = float(getattr(r, 'perimeter', 0) or 0)
-            
-            if 'حمام' in rtype or 'bathroom' in rtype or 'bath' in rtype or 'wc' in rtype:
-                bathrooms.append({'name': name, 'area': area, 'perimeter': perim})
-            elif 'مطبخ' in rtype or 'kitchen' in rtype:
-                kitchens.append({'name': name, 'area': area, 'perimeter': perim})
+                # IMPORTANT: support both 'perim' and 'perimeter'
+                perim = float(getattr(r, 'perim', None) or getattr(r, 'perimeter', 0) or 0)
+
+            low_name = str(name or '').lower()
+            is_toilet = any(k in rtype or k in low_name for k in ['تواليت', 'wc', 'toilet'])
+            is_bath = any(k in rtype or k in low_name for k in ['حمام', 'bathroom', 'bath'])
+            is_kitchen = any(k in rtype or k in low_name for k in ['مطبخ', 'kitchen'])
+            is_balcony = any(k in rtype or k in low_name for k in ['بلكون', 'شرفة', 'balcony', 'terrace'])
+
+            if is_toilet:
+                toilets.append({'name': name, 'area': area, 'perimeter': perim, 'room_obj': r})
+            elif is_bath:
+                bathrooms.append({'name': name, 'area': area, 'perimeter': perim, 'room_obj': r})
+            elif is_kitchen:
+                kitchens.append({'name': name, 'area': area, 'perimeter': perim, 'room_obj': r})
+            elif is_balcony:
+                balconies.append({'name': name, 'area': area, 'perimeter': perim, 'room_obj': r})
+            else:
+                others.append({'name': name, 'area': area, 'perimeter': perim, 'room_obj': r})
         
-        if not bathrooms and not kitchens:
+        if not bathrooms and not toilets and not kitchens and not balconies and not others:
             messagebox.showinfo("لا توجد غرف", 
                 "لم يتم العثور على حمامات أو مطابخ.\n"
-                "تأكد من تحديد الغرف أولاً مع نوع 'حمام' أو 'مطبخ'.")
+                "تأكد من تحديد الغرف أولاً.")
             return
         
-        # Show selection dialog
-        wall_height = getattr(self.app.project, 'default_wall_height', 3.0)
-        
-        # Build message
-        msg = "سيتم إنشاء السيراميك التالي:\n\n"
-        zones_to_add = []
-        
-        for b in bathrooms:
-            wall_area = b['perimeter'] * wall_height
-            floor_area = b['area']
-            msg += f"🚿 {b['name']}:\n"
-            msg += f"   • حائط: {b['perimeter']:.1f}م × {wall_height:.1f}م = {wall_area:.1f} م²\n"
-            msg += f"   • أرضية: {floor_area:.1f} م²\n\n"
-            
-            # Delete existing ceramics for this bathroom
-            self.app.project.ceramic_zones = [
-                z for z in self.app.project.ceramic_zones
-                if (z.get('room_name') if isinstance(z, dict) else getattr(z, 'room_name', None)) != b['name']
-            ]
-            
-            zones_to_add.append(CeramicZone.for_wall(
-                perimeter=b['perimeter'],
-                height=wall_height,
-                room_name=b['name'],
-                category='Bathroom',
-                name=f"سيراميك حائط - {b['name']}"
-            ))
-            zones_to_add.append(CeramicZone.for_floor(
-                area=floor_area,
-                room_name=b['name'],
-                category='Bathroom',
-                name=f"سيراميك أرضية - {b['name']}"
-            ))
-        
-        for k in kitchens:
-            backsplash_height = 0.6  # 60cm backsplash
-            backsplash_area = k['perimeter'] * backsplash_height
-            msg += f"🍳 {k['name']}:\n"
-            msg += f"   • باكسبلاش: {k['perimeter']:.1f}م × {backsplash_height:.1f}م = {backsplash_area:.1f} م²\n\n"
-            
-            zones_to_add.append(CeramicZone.for_wall(
-                perimeter=k['perimeter'],
-                height=backsplash_height,
-                start_height=0.85,  # Counter height
-                room_name=k['name'],
-                category='Kitchen',
-                name=f"باكسبلاش - {k['name']}"
-            ))
-        
-        msg += "هل تريد إضافة هذه المناطق؟"
-        
-        if messagebox.askyesno("سيراميك سريع", msg):
-            self.app.project.ceramic_zones.extend(zones_to_add)
-            self.refresh_data()
-            # Also refresh coatings tab if exists
-            if hasattr(self.app, 'coatings_tab'):
-                self.app.coatings_tab.refresh_data()
-            messagebox.showinfo("تم", f"تمت إضافة {len(zones_to_add)} منطقة سيراميك.")
+        # NEW: Show dialog for height adjustment
+        self._show_quick_wizard_dialog(bathrooms, toilets, kitchens, balconies, others, _resolve_room_wall_height)
+    
+    def _show_quick_wizard_dialog(self, bathrooms, toilets, kitchens, balconies, others, resolve_height_func):
+        """Show a structured dialog for quick ceramic generation (simpler + consistent)."""
+
+        dialog = tk.Toplevel(self.app.root)
+        dialog.title("⚡ السيراميك السريع")
+        dialog.configure(bg=self.app.colors['bg_secondary'])
+        dialog.transient(self.app.root)
+        dialog.grab_set()
+        dialog.geometry("760x640")
+
+        # Header
+        header = ttk.Frame(dialog, style='Main.TFrame', padding=12)
+        header.pack(fill=tk.X)
+        ttk.Label(
+            header,
+            text="⚡ السيراميك السريع",
+            font=('Segoe UI Semibold', 14),
+            foreground=self.app.colors['accent'],
+        ).pack(anchor='w')
+        ttk.Label(
+            header,
+            text="1) اختر الأسطح  2) اختر الغرف  3) عدّل الارتفاع إن لزم",
+            foreground=self.app.colors['text_secondary'],
+        ).pack(anchor='w')
+
+        # Options (fixed, not inside a long scroll)
+        opts = ttk.LabelFrame(dialog, text="⚙️ خيارات", style='Card.TLabelframe', padding=10)
+        opts.pack(fill=tk.X, padx=12, pady=(0, 10))
+
+        add_walls_var = tk.BooleanVar(value=True)
+        add_floor_var = tk.BooleanVar(value=True)
+        add_ceiling_var = tk.BooleanVar(value=False)  # default: NO ceiling (per user request)
+        kitchen_mode_var = tk.StringVar(value='backsplash')  # 'backsplash' or 'full'
+
+        # Surface presets
+        preset_row = ttk.Frame(opts, style='Main.TFrame')
+        preset_row.pack(fill=tk.X)
+        ttk.Label(preset_row, text="اختيار سريع:", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
+
+        def _set_surfaces(walls: bool, floor: bool, ceiling: bool):
+            add_walls_var.set(bool(walls))
+            add_floor_var.set(bool(floor))
+            add_ceiling_var.set(bool(ceiling))
+
+        self.create_button(preset_row, "جدران فقط", lambda: _set_surfaces(True, False, False), 'Secondary.TButton').pack(side=tk.LEFT, padx=(8, 4))
+        self.create_button(preset_row, "جدران + أرضية", lambda: _set_surfaces(True, True, False), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+        self.create_button(preset_row, "كامل (مع سقف)", lambda: _set_surfaces(True, True, True), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+
+        # Surface toggles
+        surf_row = ttk.Frame(opts, style='Main.TFrame')
+        surf_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(surf_row, text="الأسطح:", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
+        ttk.Checkbutton(surf_row, text="جدران", variable=add_walls_var).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(surf_row, text="أرضية", variable=add_floor_var).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(surf_row, text="سقف", variable=add_ceiling_var).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Kitchen mode
+        kitchen_row = ttk.Frame(opts, style='Main.TFrame')
+        kitchen_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(kitchen_row, text="المطبخ (للجدران فقط):", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
+        ttk.Radiobutton(kitchen_row, text="باكسبلاش 0.60م @ 0.85م", value='backsplash', variable=kitchen_mode_var).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Radiobutton(kitchen_row, text="جدران كاملة", value='full', variable=kitchen_mode_var).pack(side=tk.LEFT, padx=(8, 0))
+
+        # Room selection area (tabs)
+        content = ttk.Frame(dialog, style='Main.TFrame', padding=(12, 0, 12, 0))
+        content.pack(fill=tk.BOTH, expand=True)
+
+        notebook = ttk.Notebook(content)
+        notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Store rows in a consistent structure
+        room_rows = []  # [{type, data, include_var, height_var}]
+
+        def _make_tab(title: str, rows: list, default_include: bool):
+            tab = ttk.Frame(notebook, style='Main.TFrame')
+            notebook.add(tab, text=title)
+
+            top = ttk.Frame(tab, style='Main.TFrame', padding=(8, 8, 8, 6))
+            top.pack(fill=tk.X)
+
+            ttk.Label(top, text="تحديد:", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
+
+            def _select_all(val: bool):
+                for row in rows:
+                    row['include_var'].set(bool(val))
+
+            self.create_button(top, "الكل", lambda: _select_all(True), 'Secondary.TButton').pack(side=tk.LEFT, padx=(8, 4))
+            self.create_button(top, "لا شيء", lambda: _select_all(False), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+
+            body = ttk.Frame(tab, style='Main.TFrame', padding=(8, 0, 8, 8))
+            body.pack(fill=tk.BOTH, expand=True)
+
+            # Scrollable list per tab
+            canvas = tk.Canvas(body, bg=self.app.colors['bg_secondary'], highlightthickness=0)
+            sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+            inner = ttk.Frame(canvas, style='Main.TFrame')
+            inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=inner, anchor='nw')
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+            for row in rows:
+                d = row['data']
+                computed_h = resolve_height_func(d['room_obj'])
+                row['height_var'].set(f"{computed_h:.2f}")
+                row['include_var'].set(bool(default_include))
+
+                card = ttk.Frame(inner, style='Card.TFrame', padding=8)
+                card.pack(fill=tk.X, pady=4)
+
+                ttk.Checkbutton(card, text="تضمين", variable=row['include_var']).grid(row=0, column=3, padx=(10, 4), sticky='e')
+
+                ttk.Label(card, text=f"{d['name']}", font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, sticky='w', padx=4)
+                ttk.Label(
+                    card,
+                    text=f"محيط: {float(d.get('perimeter', 0) or 0):.2f}م  |  مساحة: {float(d.get('area', 0) or 0):.2f}م²",
+                    foreground=self.app.colors['text_secondary'],
+                ).grid(row=1, column=0, sticky='w', padx=4)
+
+                ttk.Label(card, text="ارتفاع الجدران (م):", foreground=self.app.colors['text_secondary']).grid(row=0, column=1, padx=(20, 4), sticky='e')
+                ttk.Entry(card, textvariable=row['height_var'], width=8, justify='center').grid(row=0, column=2, padx=4)
+
+            return tab
+
+        # Build room rows per group
+        bath_rows = [{'type': 'bath', 'data': b, 'include_var': tk.BooleanVar(), 'height_var': tk.StringVar()} for b in bathrooms]
+        toilet_rows = [{'type': 'toilet', 'data': t, 'include_var': tk.BooleanVar(), 'height_var': tk.StringVar()} for t in toilets]
+        kitchen_rows = [{'type': 'kitchen', 'data': k, 'include_var': tk.BooleanVar(), 'height_var': tk.StringVar()} for k in kitchens]
+        balcony_rows = [{'type': 'balcony', 'data': b, 'include_var': tk.BooleanVar(), 'height_var': tk.StringVar()} for b in balconies]
+        other_rows = [{'type': 'other', 'data': o, 'include_var': tk.BooleanVar(), 'height_var': tk.StringVar()} for o in others]
+        room_rows.extend(bath_rows + toilet_rows + kitchen_rows + balcony_rows + other_rows)
+
+        if bath_rows:
+            _make_tab("🚿 حمامات", bath_rows, default_include=True)
+        if toilet_rows:
+            _make_tab("🚽 تواليت", toilet_rows, default_include=True)
+        if kitchen_rows:
+            _make_tab("🍳 مطابخ", kitchen_rows, default_include=True)
+        if balcony_rows:
+            _make_tab("🪟 بلكون", balcony_rows, default_include=True)
+        if other_rows:
+            _make_tab("🏠 غرف أخرى", other_rows, default_include=False)
+
+        # Quick selection buttons (which rooms)
+        quick = ttk.Frame(dialog, style='Main.TFrame', padding=(12, 10))
+        quick.pack(fill=tk.X)
+        ttk.Label(quick, text="اختيار الغرف:", foreground=self.app.colors['text_secondary']).pack(side=tk.LEFT)
+
+        def _select_rooms(types_to_keep: set | None):
+            for r in room_rows:
+                if types_to_keep is None:
+                    r['include_var'].set(True)
+                else:
+                    r['include_var'].set(r['type'] in types_to_keep)
+
+        self.create_button(quick, "الكل", lambda: _select_rooms(None), 'Secondary.TButton').pack(side=tk.LEFT, padx=(8, 4))
+        self.create_button(quick, "لا شيء", lambda: _select_rooms(set()), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+        self.create_button(quick, "تواليت فقط", lambda: _select_rooms({'toilet'}), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+        self.create_button(quick, "حمامات فقط", lambda: _select_rooms({'bath'}), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+        self.create_button(quick, "مطبخ فقط", lambda: _select_rooms({'kitchen'}), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+        self.create_button(quick, "بلكون فقط", lambda: _select_rooms({'balcony'}), 'Secondary.TButton').pack(side=tk.LEFT, padx=4)
+
+        # Summary + buttons
+        bottom = ttk.Frame(dialog, style='Main.TFrame', padding=12)
+        bottom.pack(fill=tk.X)
+
+        summary_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=summary_var, foreground=self.app.colors['accent']).pack(side=tk.LEFT)
+
+        def _update_summary(*_):
+            selected = [r for r in room_rows if bool(r['include_var'].get())]
+            parts = []
+            if add_walls_var.get():
+                parts.append("جدران")
+            if add_floor_var.get():
+                parts.append("أرضية")
+            if add_ceiling_var.get():
+                parts.append("سقف")
+            surf = " + ".join(parts) if parts else "(لا يوجد أسطح)"
+            summary_var.set(f"المحدد: {len(selected)} غرفة | الأسطح: {surf}")
+
+        _update_summary()
+        add_walls_var.trace_add('write', _update_summary)
+        add_floor_var.trace_add('write', _update_summary)
+        add_ceiling_var.trace_add('write', _update_summary)
+        for r in room_rows:
+            r['include_var'].trace_add('write', _update_summary)
+
+        def apply_zones():
+            try:
+                if not (add_walls_var.get() or add_floor_var.get() or add_ceiling_var.get()):
+                    messagebox.showerror("خطأ", "اختر سطح واحد على الأقل (جدران/أرضية/سقف).")
+                    return
+
+                selected = [r for r in room_rows if bool(r['include_var'].get())]
+                if not selected:
+                    messagebox.showinfo("Info", "اختر غرفة واحدة على الأقل.")
+                    return
+
+                zones_to_add = []
+                for r in selected:
+                    info_type = r['type']
+                    d = r['data']
+
+                    try:
+                        wall_height = float((r['height_var'].get() or '').strip())
+                    except ValueError:
+                        messagebox.showerror("خطأ", f"ارتفاع غير صحيح للغرفة '{d['name']}'")
+                        return
+
+                    room_name = d['name']
+                    perim = float(d.get('perimeter', 0) or 0)
+                    area = float(d.get('area', 0) or 0)
+
+                    if info_type == 'kitchen':
+                        # Walls for kitchen depend on mode; respect the global "walls" toggle
+                        if add_walls_var.get():
+                            if kitchen_mode_var.get() == 'full':
+                                zones_to_add.append(
+                                    CeramicZone.for_wall(
+                                        perimeter=perim,
+                                        height=wall_height,
+                                        room_name=room_name,
+                                        category='Kitchen',
+                                        name=f"سيراميك حائط - {room_name}",
+                                    )
+                                )
+                            else:
+                                zones_to_add.append(
+                                    CeramicZone.for_wall(
+                                        perimeter=perim,
+                                        height=0.6,
+                                        start_height=0.85,
+                                        room_name=room_name,
+                                        category='Kitchen',
+                                        name=f"باكسبلاش - {room_name}",
+                                    )
+                                )
+                        # Floor/Ceiling use the global toggles
+                        if add_floor_var.get() and area > 0:
+                            zones_to_add.append(
+                                CeramicZone.for_floor(
+                                    area=area,
+                                    room_name=room_name,
+                                    category='Kitchen',
+                                    name=f"سيراميك أرضية - {room_name}",
+                                )
+                            )
+                        if add_ceiling_var.get() and area > 0:
+                            cz = CeramicZone.for_floor(
+                                area=area,
+                                room_name=room_name,
+                                category='Kitchen',
+                                name=f"سيراميك سقف - {room_name}",
+                            )
+                            cz.surface_type = 'ceiling'
+                            zones_to_add.append(cz)
+                        continue
+
+                    # Default for bath/toilet/balcony/other
+                    category = {
+                        'bath': 'Bathroom',
+                        'toilet': 'Toilet',
+                        'balcony': 'Balcony',
+                        'other': 'Other',
+                    }.get(info_type, 'Other')
+
+                    if add_walls_var.get() and perim > 0:
+                        zones_to_add.append(
+                            CeramicZone.for_wall(
+                                perimeter=perim,
+                                height=wall_height,
+                                room_name=room_name,
+                                category=category,
+                                name=f"سيراميك حائط - {room_name}",
+                            )
+                        )
+                    if add_floor_var.get() and area > 0:
+                        zones_to_add.append(
+                            CeramicZone.for_floor(
+                                area=area,
+                                room_name=room_name,
+                                category=category,
+                                name=f"سيراميك أرضية - {room_name}",
+                            )
+                        )
+                    if add_ceiling_var.get() and area > 0:
+                        cz = CeramicZone.for_floor(
+                            area=area,
+                            room_name=room_name,
+                            category=category,
+                            name=f"سيراميك سقف - {room_name}",
+                        )
+                        cz.surface_type = 'ceiling'
+                        zones_to_add.append(cz)
+
+                if not zones_to_add:
+                    messagebox.showinfo("Info", "لا توجد عناصر لإضافتها (تحقق من اختيار الغرف/الأسطح).")
+                    return
+
+                affected_rooms = {z.room_name for z in zones_to_add if getattr(z, 'room_name', None)}
+                self.app.project.ceramic_zones = [
+                    z for z in (self.app.project.ceramic_zones or [])
+                    if (z.get('room_name') if isinstance(z, dict) else getattr(z, 'room_name', None)) not in affected_rooms
+                ]
+
+                self.app.project.ceramic_zones.extend(zones_to_add)
+                self.refresh_data()
+                if hasattr(self.app, 'coatings_tab'):
+                    self.app.coatings_tab.refresh_data()
+
+                dialog.destroy()
+                messagebox.showinfo("تم", f"تمت إضافة {len(zones_to_add)} منطقة سيراميك.")
+            except Exception as e:
+                messagebox.showerror("خطأ", f"فشل التطبيق:\n{e}")
+
+        self.create_button(bottom, "❌ إلغاء", dialog.destroy, 'Secondary.TButton').pack(side=tk.RIGHT, padx=4)
+        self.create_button(bottom, "✅ تطبيق", apply_zones, 'Accent.TButton').pack(side=tk.RIGHT, padx=4)
